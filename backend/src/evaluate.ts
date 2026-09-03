@@ -1,5 +1,5 @@
-import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import { bedrockClient, EVALUATION_MODEL_ID, AWS_REGION, extractJson } from "./bedrock";
+import { EVALUATION_MODEL_ID, AWS_REGION } from "./bedrock";
+import { callJson } from "./llm";
 import { QuestionBank } from "./questionBank";
 import { GroundedScorecard } from "./scorecardTypes";
 
@@ -73,6 +73,15 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 ${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** The transcript is in that language. Assess the CONTENT of the answers exactly as you would in English — depth, ownership, reasoning — and never treat the choice of language, or code-switching with English, as a weakness. Quote evidence verbatim in the original script and add a short English gloss in parentheses in your justification so a non-speaker can follow.
 ` : ""}- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
 
+WHAT WE ARE ACTUALLY HIRING FOR — read this before you score anything
+We are hiring problem solvers, not people who memorised answers. That distinction decides how you grade:
+
+- **Reward the reasoning, not the recall.** How someone approaches an unfamiliar problem — what they check first, what they rule out, which trade-off they name — is the signal. Whether they remembered a keyword, a library name, an exact number, or a version is NOT. Someone who says "I don't remember the exact figure, but the shape of it was…" and then reasons well is a STRONG candidate, not a hedging one.
+- **The model answers below are a guide, not a checklist.** Do NOT count how many listed points a candidate hit. A candidate who reaches a sound conclusion by a route nobody wrote down deserves full credit, and one who recites the listed points without understanding deserves less. If their answer is different but defensible, that is a good answer.
+- **Do not nitpick.** Missing a refinement, a secondary optimisation, or the "textbook" term for something they described correctly in their own words is not a deduction. Ask yourself "did they understand it?", not "did they say it the way the notes said it?".
+- **This is a conversation, not an exam.** The point is to get to know how this person thinks and works, well enough for a hiring manager to decide whether to spend an hour on them. Judge the whole picture, not each sentence.
+- **Rote fluency is the thing to be suspicious of**, not imprecision. Textbook-perfect recall that collapses the moment you ask "why" is a weaker signal than messy reasoning that holds up.
+
 THE SIGNAL THAT MATTERS MOST
 The single most valuable thing you can detect is a MISMATCH between what the resume claims and what the person can actually discuss. Someone who did the work can explain a decision they rejected and why. Someone narrating a README cannot. Weight that heavily. Everything else is secondary.
 
@@ -88,7 +97,7 @@ ${bank.rubric
 
 CALIBRATION: these bars are written for a ${bank.seniority} hire. Score against THAT standard, not against engineers in general. A strong intern answer and a strong staff answer look nothing alike, and penalising an intern for not reasoning like a staff engineer is a grading error.
 
-WHAT WAS ASKED, AND WHAT GOOD LOOKED LIKE:
+WHAT WAS ASKED, AND ROUGHLY WHAT A GOOD ANSWER LOOKED LIKE. These are illustrative, NOT a marking scheme — see the note above about reasoning over recall. A different sound answer scores just as well:
 ${bank.questions
   .map(
     (q, i) =>
@@ -177,21 +186,14 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
     })
     .join("\n");
 
-  const response = await bedrockClient.send(
-    new ConverseCommand({
-      modelId: EVALUATION_MODEL_ID,
-      system: [{ text: buildPrompt(input) }],
-      messages: [
-        { role: "user", content: [{ text: `=== INTERVIEW TRANSCRIPT ===\n\n${transcript}` }] },
-      ],
-      inferenceConfig: { maxTokens: 8000, temperature: 0.2 },
-    })
-  );
-
-  const text = response.output?.message?.content?.[0]?.text;
-  if (!text) throw new Error("Evaluation returned an empty response.");
-
-  const parsed = extractJson(text);
+  const { parsed, provider, model } = await callJson({
+    modelId: EVALUATION_MODEL_ID,
+    system: buildPrompt(input),
+    user: `=== INTERVIEW TRANSCRIPT ===\n\n${transcript}`,
+    maxTokens: 8000,
+    temperature: 0.2,
+    label: "grading",
+  });
 
   /**
    * screenQuality is a claim about the PLATFORM, and the relay's drop count is
@@ -231,7 +233,10 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
     durationSeconds: input.durationSeconds,
     evaluatedAt: new Date().toISOString(),
     evaluationMode: "realtime_llm",
-    modelUsed: `${EVALUATION_MODEL_ID} (Amazon Bedrock, ${AWS_REGION})`,
+    modelUsed:
+      provider === "bedrock"
+        ? `${model} (Amazon Bedrock, ${AWS_REGION})`
+        : `${model} (OpenRouter fallback — Bedrock was unavailable)`,
   } as GroundedScorecard;
 }
 
@@ -252,23 +257,17 @@ export async function evaluateGeneric(input: {
     .map((t) => `${t.sender === "candidate" ? input.candidateName : "Interviewer"}: ${t.text}`)
     .join("\n");
 
-  const response = await bedrockClient.send(
-    new ConverseCommand({
-      modelId: EVALUATION_MODEL_ID,
-      system: [
-        {
-          text: `You are screening a ${input.role} candidate using a standard industry rubric: general technical competence, system design, coding fundamentals, and communication.
+  const { parsed } = await callJson({
+    modelId: EVALUATION_MODEL_ID,
+    system: `You are screening a ${input.role} candidate using a standard industry rubric: general technical competence, system design, coding fundamentals, and communication.
 
 You have no information about the hiring company's stack, constraints, or engineering environment. Judge purely on general software engineering ability, as a generic screening tool would.
 
 Return ONLY: { "verdict": "Strong Hire"|"Hire"|"Borderline"|"Reject", "overallScore": 0-100, "summary": "2-3 sentences" }`,
-        },
-      ],
-      messages: [{ role: "user", content: [{ text: transcript }] }],
-      inferenceConfig: { maxTokens: 1000, temperature: 0.2 },
-    })
-  );
-
-  const text = response.output?.message?.content?.[0]?.text || "{}";
-  return extractJson(text);
+    user: transcript,
+    maxTokens: 1000,
+    temperature: 0.2,
+    label: "generic-counterfactual",
+  });
+  return parsed;
 }

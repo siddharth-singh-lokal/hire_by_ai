@@ -1,11 +1,13 @@
+// MUST be first: loads .env before any module reads process.env.
+import "./env";
 import express, { Request, Response } from "express";
 import { createServer } from "http";
 import cors from "cors";
-import dotenv from "dotenv";
 import { EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
 import { attachNovaSonicRelay } from "./novaSonic";
 import { generateQuestionBank, loadContextPack, InterviewDuration, QuestionBank } from "./questionBank";
 import { resolveLanguage } from "./languages";
+import { llmProviderStatus } from "./llm";
 import {
   createSession,
   getSession,
@@ -15,7 +17,6 @@ import {
 } from "./sessionStore";
 import { gradeSession } from "./grading";
 
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -38,6 +39,7 @@ app.get("/health", (_req: Request, res: Response) => {
     region: AWS_REGION,
     evaluationModel: EVALUATION_MODEL_ID,
     voiceModel: SONIC_MODEL_ID,
+    textProvider: llmProviderStatus(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -49,6 +51,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
     region: AWS_REGION,
     evaluationModel: EVALUATION_MODEL_ID,
     voiceModel: SONIC_MODEL_ID,
+    textProvider: llmProviderStatus(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -345,9 +348,31 @@ app.get("/api/scorecard/:id", (req: Request, res: Response) => {
     return res.status(404).json({ error: "NOT_FOUND", message: "No such interview." });
   }
 
+  /**
+   * A regrade in flight still holds the PREVIOUS scorecard. Reporting
+   * "completed" then hands the recruiter stale data and makes the Re-grade
+   * button look like it did nothing — the page re-renders the old card and
+   * stops polling. Report the live state instead so it polls to the new one.
+   */
+  const regrading =
+    !!session.scorecard && (session.status === "grading" || session.status === "in_progress");
+
+  if (regrading) {
+    return res.json({
+      status: "grading",
+      candidateName: session.candidateName,
+      role: session.role,
+      transcriptCount: session.transcripts.length,
+    });
+  }
+
   if (session.scorecard) {
     return res.json({
       status: "completed",
+      // Set when a LATER grading attempt failed while this (older) scorecard
+      // stands. Without it the recruiter sees a stale result and no hint that
+      // the re-grade they just triggered errored.
+      gradingError: session.gradingError,
       candidateName: session.candidateName,
       role: session.role,
       evaluation: session.scorecard,

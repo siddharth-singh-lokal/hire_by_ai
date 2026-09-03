@@ -1,7 +1,7 @@
-import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import * as fs from "fs";
 import * as path from "path";
-import { bedrockClient, GENERATION_MODEL_ID, extractJson } from "./bedrock";
+import { GENERATION_MODEL_ID } from "./bedrock";
+import { callJson } from "./llm";
 import { ContextPack } from "./contextPack/types";
 import { LanguageConfig, LANGUAGES, DEFAULT_LANGUAGE } from "./languages";
 
@@ -104,6 +104,13 @@ export interface QuestionBank {
   /** Requirements with no supporting resume evidence — the interview must probe these. */
   unevidencedRequirements: string[];
   openingLine: string;
+  /**
+   * Discipline inferred from the JD. Kept on the bank so the live interviewer
+   * can introduce herself credibly — she used to claim to be "a senior
+   * engineer" while screening a field sales candidate, which reads as a system
+   * that was not built for that job.
+   */
+  discipline?: string;
 }
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
@@ -398,28 +405,14 @@ export async function generateQuestionBank(opts: {
     `[questionBank] discipline "${discipline}" — ${relevantCount} of ${pack?.scenarios.length ?? 0} scenarios relevant`
   );
 
-  const response = await bedrockClient.send(
-    new ConverseCommand({
-      modelId: GENERATION_MODEL_ID,
-      system: [{ text: buildSystemPrompt(pack, plan, duration, discipline) }],
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              text: `=== JOB DESCRIPTION ===\n${opts.jdText.slice(0, 20000)}\n\n=== CANDIDATE RESUME ===\n${opts.resumeText.slice(0, 20000)}`,
-            },
-          ],
-        },
-      ],
-      inferenceConfig: { maxTokens: 8000, temperature: 0.4 },
-    })
-  );
-
-  const text = response.output?.message?.content?.[0]?.text;
-  if (!text) throw new Error("Question bank generation returned an empty response.");
-
-  const parsed = extractJson(text);
+  const { parsed } = await callJson({
+    modelId: GENERATION_MODEL_ID,
+    system: buildSystemPrompt(pack, plan, duration, discipline),
+    user: `=== JOB DESCRIPTION ===\n${opts.jdText.slice(0, 20000)}\n\n=== CANDIDATE RESUME ===\n${opts.resumeText.slice(0, 20000)}`,
+    maxTokens: 8000,
+    temperature: 0.4,
+    label: "question-bank",
+  });
   const questions: BankQuestion[] = (parsed.questions || []).map(normaliseQuestion);
 
   return {
@@ -432,7 +425,33 @@ export async function generateQuestionBank(opts: {
     claimsToVerify: Array.isArray(parsed.claimsToVerify) ? parsed.claimsToVerify : [],
     unevidencedRequirements: toList(parsed.unevidencedRequirements),
     openingLine: parsed.openingLine || "",
+    discipline,
   };
+}
+
+/**
+ * How the interviewer describes herself, by discipline.
+ *
+ * "A senior engineer" is the right credential in front of an engineer and the
+ * wrong one in front of a delivery rider or a field sales candidate — this
+ * system screens both.
+ */
+function personaTitle(discipline?: string): string {
+  switch (discipline) {
+    case "backend":
+    case "frontend":
+    case "mobile":
+    case "devops":
+      return "a senior engineer";
+    case "data":
+      return "a senior analyst on the data team";
+    case "product":
+      return "a senior product manager";
+    case "design":
+      return "a senior designer";
+    default:
+      return "a senior member of the hiring team";
+  }
 }
 
 /**
@@ -507,7 +526,7 @@ ${options.resumeNote}`
     : `HOW TO OPEN
 ${personaliseOpening(bank.openingLine, candidateName)}`;
 
-  return `You are ${interviewer}, a senior engineer conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
+  return `You are ${interviewer}, ${personaTitle(bank.discipline)} conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
 
 The candidate's name is ${candidateName}. ${
     options.resumeNote
@@ -524,6 +543,10 @@ HOW TO CONDUCT THIS
 
 KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or three sentences, then stop talking. You are on a voice call — a thirty-second monologue is unbearable to sit through and burns interview time the candidate needs for answering. Ask the question and stop. Do not preamble, do not restate the question a second way, do not explain why you are asking.
 
+THE MOMENT THEY START SPEAKING, STOP. Mid-word if necessary. Never finish your sentence over them, never repeat what you were saying, and never say "as I was saying" or "let me finish". If you and the candidate start at the same time, yield — you can always ask again, and they may be about to say the thing you most need to hear. After they stop, respond to what they actually said rather than returning to your script.
+
+LET SILENCE SIT. If they pause, wait. People think before they answer, especially in a second language, and a three-second gap is normal. Do not fill it, do not rephrase the question, and do not offer hints. Only step in if they have been silent for a good while, and then just check in briefly.
+
 LANGUAGE. ${
     language.directive
       ? language.directive
@@ -536,7 +559,7 @@ LANGUAGE. ${
 - Adapt. If an answer is strong, use the escalation and go deeper. If they are floundering, use the fallback or move on — grinding someone down produces no signal and is unpleasant.
 - Probe vague answers once: "can you be more specific about how you did that?" Accept the second answer and move on.
 - Stay conversational. This is a discussion between engineers, not an interrogation. Brief acknowledgements are fine; long monologues are not.
-- Stay inside the candidate's field. The questions above are already scoped to their role; ask those, and if you improvise a follow-up keep it in their domain. Never drift into backend, infrastructure, or distributed-systems topics unless this is a backend/infra role.
+- Stay inside the candidate's field. The questions above are already scoped to their role; ask those, and if you improvise a follow-up keep it in their domain. Never drift into engineering, infrastructure or distributed-systems topics unless this is genuinely an engineering role — and if this is not a technical role at all, keep every follow-up practical and grounded in the day-to-day work.
 - NEVER state what you are assessing, what a good answer contains, or what you were hoping they would say — not before, during, or after a question. If they ask how they did, say the team will follow up.
 - If the candidate asks about internal systems, company specifics, or anything you were not given, say you cannot go into detail and return to the question. You genuinely do not have that information.
 - If the candidate says something unrelated to the interview (a joke, a test, a request for something else), decline in one light sentence and return to your question. Do not lecture.

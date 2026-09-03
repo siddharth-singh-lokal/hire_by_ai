@@ -145,8 +145,31 @@ nobody reviewed — refusing is the honest outcome.
   no inference profile exists.
 - In this sandbox `opus-5`, `sonnet-5`, `gpt-5.6-*` and `grok-4.6` all return
   **AccessDenied**. Available: sonnet-4-5/4-6, opus-4-5/4-6, haiku-4-5.
-- Workshop credentials expire with the event. A 403 usually means expiry, not
-  misconfiguration.
+- **Workshop credentials expire with the event, and they expire mid-session.**
+  Observed live: `sts get-caller-identity` succeeded, and ten minutes later
+  every Bedrock call returned `ExpiredTokenException`. Refresh the `workshop`
+  profile in `~/.aws/credentials` (the AWS sandbox hands out a new
+  key/secret/session-token triple) and restart the backend. A 403 or a 424 is
+  almost always this, not misconfiguration.
+- **Voice has no fallback provider, by necessity.** Nova Sonic is the only
+  realtime bidirectional speech-to-speech option available here. OpenRouter was
+  checked directly: of 425 models, four emit audio at all (two are music
+  generation, two are request/response `gpt-audio`) and none are realtime, so
+  barge-in and VAD turn-taking are impossible on it. If Bedrock is down, the
+  interview cannot run — say so rather than degrading it to a walkie-talkie.
+- **Text calls DO have a fallback.** `src/llm.ts` is the single call site for
+  bank generation, grading, the counterfactual and the pack sanitizer. Bedrock
+  is primary; on a provider-level failure (expired token, revoked model access,
+  throttling) it retries once on OpenRouter and records the truth in the
+  scorecard's `modelUsed`. Verified against genuinely expired credentials:
+  identical axis scores and verdict, overall 68 vs 72. `LLM_PROVIDER=openrouter`
+  forces it for testing. Prompt-level errors are NOT retried — a bad prompt
+  fails the same way everywhere.
+- **Load `./env` first in every entry point.** Module bodies run at import
+  time, so a `dotenv.config()` below the import list runs too late and any
+  module-level `process.env.X` has already been read as empty. That silently
+  disabled the OpenRouter fallback while the key sat in `.env`. `src/llm.ts`
+  now also reads env lazily so import order cannot break it again.
 
 ### Nova Sonic protocol
 
@@ -243,15 +266,44 @@ withholding them costs nothing.
   most BT headsets drop to the hands-free profile (8/16kHz codec) — the
   interviewer sounds tinny and crackly regardless of anything in this code.
   Test with wired headphones or the laptop's own mic and speakers.
-- **A barge-in flush discards buffered speech**, so a spurious one cuts the
-  interviewer off regardless of buffering. Echo from speakers is the usual cause
-  of constant mid-sentence interruptions. Two guards: while she speaks the mic is
-  gated (`BARGE_GATE` in `mic-processor.js` — residual echo below it is sent as
-  silence, so Sonic never hears it as a barge-in), and any flush Sonic does send
-  is ignored unless the mic was genuinely loud for `BARGE_IN_SUSTAIN_MS`.
-  Headphones remove the echo entirely and make both a no-op. Note: switching the
-  LLM does nothing here, and OpenRouter can't help — it has no realtime S2S audio;
-  the only S2S alternatives are OpenAI Realtime or Gemini Live.
+- **Interrupting her is a three-layer problem, and the mic gate was the bug.**
+  Reported as "she just keeps talking and never stops when we speak". Causes,
+  in the order they bite:
+
+  1. **The old mic gate deafened her to the candidate.** `mic-processor.js` used
+     a FIXED `BARGE_GATE` of 0.12 and **zeroed** every chunk below it while she
+     spoke. Measured against a real 92s speech waveform: only **55% of chunks
+     cleared 0.12**, and the rest became digital silence — so Sonic received
+     chopped fragments separated by silence, which its VAD does not read as
+     someone starting to talk. It never registered a barge-in, so she talked
+     straight over them. The gate is now `GATE_FLOOR + remoteLevel *
+     GATE_ECHO_RATIO` — proportional to how loud SHE is, which is what echo
+     scales with — and sub-gate audio is **attenuated to `DUCK_GAIN`, never
+     zeroed**, so the waveform stays continuous. Same clip now passes 71-76% at
+     normal playback levels. The playback worklet forwards its level to the mic
+     worklet unthrottled (`remoteLevel`) to drive this.
+  2. **Sonic's own barge-in is slow: ~5.8-6.2 seconds**, measured with
+     `npm run e2e -- --barge-in` feeding real speech. Waiting for it is not an
+     option; six seconds of being talked over is a broken conversation.
+  3. **So the client stops her itself.** `LOCAL_DUCK_AFTER_MS` (90ms) drops her
+     to 12% volume the moment the candidate is clearly speaking, which is the
+     "it heard me" cue, and `LOCAL_FLUSH_AFTER_MS` (700ms) discards her buffered
+     audio outright. Sonic catches up later and ends its turn anyway. A false
+     positive costs one dropped sentence of hers — the right trade against
+     talking over a real candidate. `__round0Audio.localBargeIns` counts these.
+
+  Any flush Sonic *does* send is still ignored unless the mic was genuinely loud
+  for `BARGE_IN_SUSTAIN_MS`, because Sonic emits spurious INTERRUPTED events
+  (observed 3-6 per run against pure silence). Headphones remove echo entirely.
+  Note: switching the LLM does nothing here, and OpenRouter can't help — it has
+  no realtime S2S audio (verified: 4 of 425 models emit audio, none realtime).
+- **Her turn length is capped structurally, not just asked for.**
+  `maxTokens` in the relay's `sessionStart` is **400**, not 1024 — 1024 is ~90
+  seconds of speech, which is what "goes on and on" was. The prompt also tells
+  her to stop mid-word when the candidate starts and to let silence sit. Total
+  measured: her speaking time fell from 138.8s to 98.4s across the same six
+  candidate turns. Do not push maxTokens much below 400 or she truncates
+  mid-sentence.
 - Live diagnostics: `__round0Audio` in the browser console.
 
 ### Context Pack
@@ -270,6 +322,17 @@ withholding them costs nothing.
 
 ### Grading
 
+- **We are grading problem solvers, not recall.** The prompt says so explicitly
+  and it changes outcomes: a candidate who says "I don't remember the exact
+  method names" and then reasons correctly through the durability trade-off and
+  the stampede mechanism scores **Advance 82** with authenticity 5, while one
+  who names WebSocket fallback, at-least-once semantics and XFetch but cannot
+  say why the spike lands at the same time daily scores **Advance with focus
+  62** with "reasoning collapses under follow-up" as a red flag. The
+  `strongAnswer`/`weakAnswer` fields are handed over as **illustrative, not a
+  marking scheme** — counting how many listed points a candidate hit is exactly
+  the failure mode to avoid. Note the rote candidate is still not rejected;
+  discriminating is not the same as harsh.
 - **`screenQuality` is clamped to the relay's drop count.** The model may
   escalate a call we already know dropped, but it may not invent degradation on
   a clean one — it did exactly that on a zero-drop run, reading ordinary spoken
@@ -331,6 +394,7 @@ npm run e2e                        # one full interview against the live relay
 npm run e2e -- --loop 3            # measure the Bedrock drop rate
 npm run e2e -- --lang hi           # Hindi run; writes backend/e2e-hi.wav to listen to
 npm run e2e -- --session <id>      # drive a session prepared in the admin UI
+npm run e2e -- --barge-in          # talk over her with REAL speech, measure when she stops
 npm --prefix backend run verify:redaction   # the Context Pack regression test
 ```
 

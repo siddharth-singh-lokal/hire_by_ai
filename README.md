@@ -156,6 +156,12 @@ Bedrock's bidirectional stream used to drop every few minutes, mid-answer. Two c
 
 When a call does drop, the grader is told. It reports `screenQuality` (`clean` / `degraded` / `compromised`) and can recommend a re-screen, and the scorecard shows that **above** the verdict — so a recruiter never reads a broken call as a weak candidate. That value is clamped to the relay's own drop count, so the model cannot invent degradation on a healthy call.
 
+## If Bedrock goes down
+
+The voice interview cannot fail over. Nova Sonic is the only realtime bidirectional speech-to-speech model available on Bedrock, and there is no equivalent elsewhere — OpenRouter, checked directly, serves 425 models of which four emit audio at all and none are realtime, so barge-in and natural turn-taking are not reproducible on it. A request/response audio model would turn the interview into a walkie-talkie, which is a worse product, not a fallback.
+
+The **text** calls are insured. Question-bank generation, grading and the counterfactual all run through one call site that keeps Bedrock primary and retries once on OpenRouter if Bedrock refuses for a provider-level reason — expired credentials, revoked model access, throttling. The scorecard records which provider actually served it. Tested against genuinely expired credentials: same verdict, same six axis scores, overall score within four points.
+
 ## Prototype limitations
 
 Deliberate scope cuts, not oversights:

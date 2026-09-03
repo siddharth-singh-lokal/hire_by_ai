@@ -213,6 +213,13 @@ const MAX_STREAM_ATTEMPTS = 5;
 /** How much recent conversation a resumed stream is shown. */
 const RESUME_TAIL_LINES = 12;
 
+/**
+ * Delay between the stream ending and grading starting, so the browser's
+ * completion POST (proctoring flags plus base64 snapshots and clips) arrives
+ * first. 3s was cutting it fine with several megabytes of evidence.
+ */
+const GRADE_DELAY_MS = 8000;
+
 export function attachNovaSonicRelay(server: Server): void {
   const wss = new WebSocketServer({ server, path: "/ws/interview" });
 
@@ -421,7 +428,12 @@ export function attachNovaSonicRelay(server: Server): void {
       event: {
         sessionStart: {
           inferenceConfiguration: {
-            maxTokens: 1024,
+            // A hard ceiling on how long one spoken turn can run. 1024 tokens
+            // is ~90 seconds of speech, which is what "she just keeps going"
+            // felt like; the prompt asks for two or three sentences and this
+            // makes it structural rather than advisory. Not lower than this:
+            // an over-tight cap truncates her mid-sentence.
+            maxTokens: 400,
             topP: 0.9,
             temperature: 0.7,
           },
@@ -727,12 +739,17 @@ export function attachNovaSonicRelay(server: Server): void {
       teardown(reason);
       if (opts.closeWs !== false && ws.readyState === WebSocket.OPEN) ws.close();
 
+      // Wait before grading so the browser's POST /complete — which carries the
+      // proctoring flags and their base64 evidence, and can be several MB — has
+      // landed. Grading first would produce a scorecard whose authenticity
+      // assessment never saw the flags. The recruiter's integrity panel reads
+      // them off the session either way, so this only affects the grader.
       const id = prepared.id;
       setTimeout(() => {
         gradeSession(id, reason).catch((e) =>
           console.error("[Sonic] Auto-grade failed:", e?.message)
         );
-      }, 3000);
+      }, GRADE_DELAY_MS);
     };
 
     // If this session already has candidate turns, the browser is reconnecting

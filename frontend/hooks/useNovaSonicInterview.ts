@@ -92,8 +92,36 @@ const MAX_WS_RECONNECTS = 5;
  * Guard: only honour a flush if the local microphone has been genuinely loud
  * for a sustained stretch. Real speech sustains; an echo transient does not.
  */
-const BARGE_IN_LEVEL = 0.08;
-const BARGE_IN_SUSTAIN_MS = 220;
+const BARGE_IN_LEVEL = 0.05;
+const BARGE_IN_SUSTAIN_MS = 130;
+
+/**
+ * How long the candidate must be speaking before we duck her playback
+ * LOCALLY, without waiting for Sonic to report the interruption.
+ *
+ * Sonic's own barge-in detection can lag or miss entirely, which is heard as
+ * the interviewer talking straight over the candidate. Ducking locally makes
+ * the call feel responsive immediately; we only discard her buffered speech
+ * once Sonic confirms, so a false positive costs a moment of low volume rather
+ * than a lost sentence.
+ */
+const LOCAL_DUCK_AFTER_MS = 90;
+
+/**
+ * How long sustained candidate speech must continue before we stop her
+ * playback outright, without waiting for Sonic.
+ *
+ * Measured against the live relay: Sonic takes ~5.8 SECONDS to report a
+ * barge-in on clean, full-volume speech. Waiting for it is what "she just
+ * keeps going and never stops" actually is — six seconds of being talked over
+ * is a broken conversation. So after this long we discard her buffered audio
+ * ourselves. Sonic still catches up and ends its turn; the only cost of a
+ * false positive is one dropped sentence of hers, against the certainty of
+ * talking over a real candidate.
+ *
+ * 700ms is well past a cough or a chair creak and well short of feeling rude.
+ */
+const LOCAL_FLUSH_AFTER_MS = 700;
 
 /**
  * Live audio diagnostics, readable from the console as `__round0Audio`.
@@ -105,6 +133,8 @@ export interface AudioDiagnostics {
   flushesHonoured: number;
   flushesIgnored: number;
   chunksReceived: number;
+  /** Times we stopped her ourselves rather than waiting on Sonic. */
+  localBargeIns: number;
 }
 
 /** Chunked base64 — a per-byte string concat stalls on larger buffers. */
@@ -172,11 +202,18 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
   /** When the mic first crossed the barge-in threshold in the current burst. */
   const loudSinceRef = useRef<number | null>(null);
+  /** Mirrors isAiSpeaking for use inside the mic callback. */
+  const isAiSpeakingRef = useRef(false);
+  /** True while her playback is locally attenuated by a suspected barge-in. */
+  const duckedRef = useRef(false);
+  /** True once we have stopped her ourselves for the current burst of speech. */
+  const locallyFlushedRef = useRef(false);
   const diagnosticsRef = useRef<AudioDiagnostics>({
     underruns: 0,
     flushesHonoured: 0,
     flushesIgnored: 0,
     chunksReceived: 0,
+    localBargeIns: 0,
   });
 
   const cleanup = useCallback(() => {
@@ -373,6 +410,8 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             if (loudFor >= BARGE_IN_SUSTAIN_MS) {
               diagnosticsRef.current.flushesHonoured++;
               playbackNodeRef.current?.port.postMessage({ type: "flush" });
+              duckedRef.current = false;
+              isAiSpeakingRef.current = false;
               setIsAiSpeaking(false);
               setAiVolume(0);
             } else {
@@ -443,11 +482,21 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         if (type === "playing") {
           // Transitions are never throttled — the speaking indicator must be
           // immediate or the orb lags behind the voice.
+          isAiSpeakingRef.current = playing;
           setIsAiSpeaking(playing);
-          if (!playing) setAiVolume(0);
+          if (playing) {
+            // A fresh turn of hers — allow it to be interrupted again.
+            locallyFlushedRef.current = false;
+          } else {
+            setAiVolume(0);
+            duckedRef.current = false;
+          }
           // Close the mic gate while she speaks so her echo can't self-interrupt.
           micNodeRef.current?.port.postMessage({ type: "remoteSpeaking", value: playing });
         } else if (type === "level") {
+          // The mic gate scales with her volume, so it needs this unthrottled —
+          // the UI meter is what gets throttled, not the gate.
+          micNodeRef.current?.port.postMessage({ type: "remoteLevel", value: peak });
           const now = performance.now();
           if (now - lastAiMeterRef.current >= METER_INTERVAL_MS) {
             lastAiMeterRef.current = now;
@@ -487,8 +536,44 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         // Track sustained loudness for the barge-in guard.
         if (userVolumeRef.current > BARGE_IN_LEVEL) {
           if (loudSinceRef.current === null) loudSinceRef.current = Date.now();
+
+          // Duck her immediately once the candidate is clearly talking, rather
+          // than waiting on Sonic to notice. This is what makes interrupting
+          // her feel like interrupting a person.
+          const loudFor = Date.now() - loudSinceRef.current;
+
+          if (
+            isAiSpeakingRef.current &&
+            !duckedRef.current &&
+            loudFor >= LOCAL_DUCK_AFTER_MS
+          ) {
+            duckedRef.current = true;
+            playbackNodeRef.current?.port.postMessage({ type: "duck", gain: 0.12 });
+          }
+
+          // Still going after the duck: she is genuinely being talked over, and
+          // Sonic will not tell us for another few seconds. Stop her now.
+          if (
+            isAiSpeakingRef.current &&
+            !locallyFlushedRef.current &&
+            loudFor >= LOCAL_FLUSH_AFTER_MS
+          ) {
+            locallyFlushedRef.current = true;
+            duckedRef.current = false;
+            isAiSpeakingRef.current = false;
+            diagnosticsRef.current.localBargeIns++;
+            playbackNodeRef.current?.port.postMessage({ type: "flush" });
+            setIsAiSpeaking(false);
+            setAiVolume(0);
+            console.info(`[audio] stopped her locally after ${loudFor}ms of candidate speech`);
+          }
         } else {
           loudSinceRef.current = null;
+          locallyFlushedRef.current = false;
+          if (duckedRef.current) {
+            duckedRef.current = false;
+            playbackNodeRef.current?.port.postMessage({ type: "duck", gain: 1 });
+          }
         }
 
         const now = performance.now();

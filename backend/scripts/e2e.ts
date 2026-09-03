@@ -54,6 +54,8 @@ interface Args {
   turnTimeoutMs: number;
   gradeTimeoutMs: number;
   probe: boolean;
+  /** Path to a 16-bit PCM WAV of real speech, used as candidate audio. */
+  bargeIn?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -78,7 +80,89 @@ function parseArgs(argv: string[]): Args {
     turnTimeoutMs: (Number(get("--turn-timeout")) || 45) * 1000,
     gradeTimeoutMs: (Number(get("--grade-timeout")) || 150) * 1000,
     probe: has("--probe"),
+    bargeIn: has("--barge-in")
+      ? get("--barge-in") && !get("--barge-in")!.startsWith("--")
+        ? get("--barge-in")
+        : path.resolve(__dirname, "..", "e2e-hi.wav")
+      : undefined,
   };
+}
+
+// --- real-speech loading, for barge-in testing --------------------------------
+
+/**
+ * Reads a 16-bit PCM WAV and resamples it to 16kHz mono, which is what the mic
+ * worklet would send.
+ *
+ * Barge-in cannot be tested with silence: Sonic decides to yield based on
+ * hearing actual speech energy, so the harness needs a real waveform. Any
+ * Sonic-produced WAV works as a stand-in for a candidate's voice.
+ */
+function loadSpeech16k(file: string): Int16Array {
+  const buf = fs.readFileSync(file);
+  // Walk the RIFF chunks rather than assuming a 44-byte header.
+  let pos = 12;
+  let rate = 24000;
+  let dataStart = -1;
+  let dataLen = 0;
+  while (pos + 8 <= buf.length) {
+    const id = buf.toString("ascii", pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    if (id === "fmt ") rate = buf.readUInt32LE(pos + 12);
+    if (id === "data") {
+      dataStart = pos + 8;
+      dataLen = size;
+      break;
+    }
+    pos += 8 + size + (size % 2);
+  }
+  if (dataStart < 0) throw new Error(`no data chunk in ${file}`);
+
+  const srcCount = Math.min(dataLen, buf.length - dataStart) >> 1;
+  const src = new Int16Array(srcCount);
+  for (let i = 0; i < srcCount; i++) src[i] = buf.readInt16LE(dataStart + i * 2);
+
+  const ratio = rate / 16000;
+  const outCount = Math.floor(srcCount / ratio);
+  const out = new Int16Array(outCount);
+  for (let i = 0; i < outCount; i++) {
+    const x = i * ratio;
+    const i0 = Math.floor(x);
+    const frac = x - i0;
+    const a = src[i0] || 0;
+    const b = src[i0 + 1] ?? a;
+    out[i] = (a + (b - a) * frac) | 0;
+  }
+  return out;
+}
+
+/**
+ * What the browser's mic gate would have done to this audio.
+ *
+ * The harness talks straight to the relay, so it bypasses the worklet — this
+ * reports, per chunk, whether the OLD fixed 0.12 gate and the NEW
+ * volume-proportional gate would have passed real speech through to Sonic.
+ * That is the difference between the interviewer hearing an interruption and
+ * talking straight over it.
+ */
+function gateVerdict(speech: Int16Array, remoteLevel: number) {
+  const CHUNK = 512;
+  let chunks = 0;
+  let oldPassed = 0;
+  let newPassed = 0;
+  const OLD_FIXED = 0.12;
+  const newGate = 0.022 + remoteLevel * 0.18;
+  for (let i = 0; i + CHUNK <= speech.length; i += CHUNK) {
+    let peak = 0;
+    for (let k = 0; k < CHUNK; k++) {
+      const v = Math.abs(speech[i + k]) / 32768;
+      if (v > peak) peak = v;
+    }
+    chunks++;
+    if (peak >= OLD_FIXED) oldPassed++;
+    if (peak >= newGate) newPassed++;
+  }
+  return { chunks, oldPassed, newPassed, newGate };
 }
 
 // --- helpers ------------------------------------------------------------------
@@ -128,6 +212,13 @@ interface RunMetrics {
   errors: string[];
   scriptHits: number;
   sampleInterviewerLine: string;
+  /** Barge-in measurement, when --barge-in is used. */
+  barge?: {
+    attempted: boolean;
+    stopLatencyMs: number | null;
+    interruptedAtMs: number | null;
+    audioChunksAfter: number;
+  };
 }
 
 interface IterationResult {
@@ -226,11 +317,55 @@ function runInterview(
     let done = false;
     let pendingTurnAfterReady = false;
     const startWall = Date.now();
+
+    // --- barge-in test state
+    const speech = a.bargeIn ? loadSpeech16k(a.bargeIn) : null;
+    const BARGE_AFTER_HER_SPEECH_MS = 1500; // let her get going first
+    const BARGE_DURATION_MS = 2500;
+    let bargeTimer: ReturnType<typeof setTimeout> | null = null;
+    let bargeOffset = 0;
+    let bargeSpeaking = false;
+    let bargeStartedAt = 0;
+    let bargeDone = false;
+    let audioChunksAfterBarge = 0;
+    let interruptedAtMs: number | null = null;
+    /**
+     * When her audio actually went quiet after the interruption.
+     *
+     * Measuring "the last chunk we ever received" is useless here — the
+     * interview carries on afterwards, so it just reports the end of the call.
+     * What matters is the first sustained GAP in her audio after the candidate
+     * started talking, which is the moment she yielded.
+     */
+    let prevAudioAt = 0;
+    let stoppedAfterMs: number | null = null;
+    const QUIET_GAP_MS = 400;
+
+    const bargeMetrics = () =>
+      speech
+        ? {
+            attempted: bargeStartedAt > 0,
+            stopLatencyMs: stoppedAfterMs,
+            interruptedAtMs,
+            audioChunksAfter: audioChunksAfterBarge,
+          }
+        : undefined;
+
+    /** One 32ms frame of real speech, or null when the clip is exhausted. */
+    function nextSpeechFrame(): string | null {
+      if (!speech) return null;
+      const CHUNK = 512;
+      if (bargeOffset + CHUNK > speech.length) bargeOffset = 0; // loop the clip
+      const slice = speech.subarray(bargeOffset, bargeOffset + CHUNK);
+      bargeOffset += CHUNK;
+      return Buffer.from(slice.buffer, slice.byteOffset, CHUNK * 2).toString("base64");
+    }
     const scriptRe = a.lang ? LANGS[a.lang].script : null;
 
     const connectTimeout = setTimeout(() => fail("timed out connecting to relay"), 15000);
 
     function cleanup() {
+      if (bargeTimer) clearTimeout(bargeTimer);
       if (silenceTimer) clearInterval(silenceTimer);
       if (settleTimer) clearTimeout(settleTimer);
       if (replyTimer) clearTimeout(replyTimer);
@@ -248,6 +383,7 @@ function runInterview(
       if (done) return;
       done = true;
       cleanup();
+      m.barge = bargeMetrics();
       resolve(m);
     }
     function send(obj: any) {
@@ -292,7 +428,14 @@ function runInterview(
           clearTimeout(connectTimeout);
           if (!tReady) tReady = Date.now();
           if (!silenceTimer) {
-            silenceTimer = setInterval(() => send({ type: "audio", data: SILENCE }), 32);
+            silenceTimer = setInterval(() => {
+              if (bargeSpeaking) {
+                const frame = nextSpeechFrame();
+                send({ type: "audio", data: frame ?? SILENCE });
+              } else {
+                send({ type: "audio", data: SILENCE });
+              }
+            }, 32);
           }
           // First turn kicks the conversation after the greeting. On a resume the
           // model waits for the candidate to speak, so nudge either way.
@@ -304,12 +447,42 @@ function runInterview(
           interviewerSpeaking = true;
           if (settleTimer) clearTimeout(settleTimer);
           if (replyTimer) clearTimeout(replyTimer); // reply has begun
+          // Once she is a little way into a turn, talk over her with real
+          // speech and measure how long she keeps going.
+          if (speech && !bargeDone && !bargeTimer && m.turnsSent >= 1) {
+            bargeTimer = setTimeout(() => {
+              bargeTimer = null;
+              if (done || !interviewerSpeaking) return;
+              bargeSpeaking = true;
+              bargeDone = true;
+              bargeStartedAt = Date.now();
+              console.log("  [barge-in] candidate starts speaking over her…");
+              setTimeout(() => {
+                bargeSpeaking = false;
+                console.log("  [barge-in] candidate stops.");
+              }, BARGE_DURATION_MS);
+            }, BARGE_AFTER_HER_SPEECH_MS);
+          }
           break;
         case "audio": {
           const buf = Buffer.from(msg.data, "base64");
           m.pcmChunks.push(buf);
           m.audioBytes += buf.length;
           if (m.ttfaMs == null && tReady) m.ttfaMs = Date.now() - tReady;
+          if (bargeStartedAt) {
+            const now = Date.now();
+            if (
+              stoppedAfterMs === null &&
+              prevAudioAt &&
+              now - prevAudioAt >= QUIET_GAP_MS
+            ) {
+              // The gap that just ended began at prevAudioAt: that is when she
+              // actually stopped.
+              stoppedAfterMs = prevAudioAt - bargeStartedAt;
+            }
+            prevAudioAt = now;
+            audioChunksAfterBarge++;
+          }
           break;
         }
         case "transcript": {
@@ -334,6 +507,9 @@ function runInterview(
           break;
         case "interrupted":
           m.interrupts++;
+          if (bargeStartedAt && interruptedAtMs === null) {
+            interruptedAtMs = Date.now() - bargeStartedAt;
+          }
           break;
         case "end_requested":
           break;
@@ -425,6 +601,18 @@ function printIteration(n: number, r: IterationResult, a: Args) {
   console.log(`  drops ${m.drops} (server ${sc?.streamDrops ?? "?"}) | interrupts ${m.interrupts} | stalls ${m.stalls} | errors ${m.errors.length}`);
   if (sc) console.log(`  grading ${(r.gradingMs / 1000).toFixed(1)}s -> ${sc.verdict} ${sc.overallScore}  axes ${sc.axisScores?.length}/${r.rubricAxes}  quality ${sc.screenQuality}`);
   if (a.lang) console.log(`  lang ${a.lang}: interviewer script hits ${m.scriptHits}/${m.lines.interviewer}, sample: "${m.sampleInterviewerLine.slice(0, 80)}"`);
+  if (m.barge) {
+    const b = m.barge;
+    if (!b.attempted) console.log("  barge-in: never triggered (she never spoke long enough)");
+    else
+      console.log(
+        `  barge-in: she went quiet ${
+          b.stopLatencyMs !== null ? b.stopLatencyMs + "ms" : "(never, within this turn)"
+        } after the candidate started | Sonic reported interrupted: ` +
+          (b.interruptedAtMs !== null ? `+${b.interruptedAtMs}ms` : "NO") +
+          ` | NOTE: the browser also ducks her locally after ~90ms, which this harness bypasses`
+      );
+  }
   if (!ok) console.log(`  FAILURES: ${r.failures.join(" | ")}`);
 }
 

@@ -59,6 +59,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 
     this.gain = 0;
     this.gainTarget = 0;
+    /** Multiplier applied on top of the ramp, for barge-in ducking. */
+    this.duckGain = 1;
+    this.duckApplied = 1;
     this.gainStep = 1 / this.fadeFrames;
     this.last = 0; // held through a gap so the ramp starts where audio was
 
@@ -73,6 +76,11 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         const chunk = new Int16Array(pcm);
         this.queue.push(chunk);
         this.buffered += chunk.length;
+      } else if (type === "duck") {
+        // Soft attenuation while a barge-in is suspected but not yet confirmed.
+        // Ramped through the same gain path as everything else, so it never
+        // steps discontinuously (which would be an audible click).
+        this.duckGain = typeof e.data.gain === "number" ? e.data.gain : 1;
       } else if (type === "flush") {
         this.queue = [];
         this.readIndex = 0;
@@ -80,6 +88,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.primed = false;
         this.dryFrames = 0;
         this.gainTarget = 0; // fade out rather than cut
+        this.duckGain = 1;
+        this.duckApplied = 1;
       }
     };
   }
@@ -157,7 +167,16 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           ? Math.min(this.gainStep, this.gainTarget - this.gain)
           : Math.max(-this.gainStep, this.gainTarget - this.gain);
 
-      const v = this.last * this.gain;
+      // Ease toward the duck target so a barge-in fades her out instead of
+      // chopping her off.
+      const dstep = 1 / this.fadeFrames;
+      if (this.duckApplied < this.duckGain) {
+        this.duckApplied = Math.min(this.duckGain, this.duckApplied + dstep);
+      } else if (this.duckApplied > this.duckGain) {
+        this.duckApplied = Math.max(this.duckGain, this.duckApplied - dstep);
+      }
+
+      const v = this.last * this.gain * this.duckApplied;
       out[i] = v;
       const abs = v < 0 ? -v : v;
       if (abs > peak) peak = abs;
