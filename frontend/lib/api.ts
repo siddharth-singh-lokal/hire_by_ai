@@ -45,7 +45,7 @@ export interface QuestionBank {
   generatedAt: string;
   role: string;
   seniority: string;
-  durationMinutes: 5 | 15 | 30 | 45;
+  durationMinutes: 1 | 5 | 15 | 30 | 45;
   rubric: RubricAxis[];
   questions: BankQuestion[];
   claimsToVerify: { claim: string; jdRequirement: string }[];
@@ -109,7 +109,7 @@ export function prepareInterview(input: {
   resumeText: string;
   candidateName: string;
   candidateEmail: string;
-  durationMinutes: 5 | 15 | 30 | 45;
+  durationMinutes: 1 | 5 | 15 | 30 | 45;
 }): Promise<PrepareResult> {
   return post<PrepareResult>("/api/prepare", input);
 }
@@ -169,6 +169,13 @@ export interface ScorecardResponse {
   evaluation?: any;
   genericComparison?: any;
   transcripts?: any[];
+  redFlags?: {
+    type: string;
+    description: string;
+    timeInSeconds: number;
+    snapshot?: string;
+    clip?: string;
+  }[];
   transcriptCount?: number;
   terminationReason?: string;
   message?: string;

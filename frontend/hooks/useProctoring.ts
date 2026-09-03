@@ -36,6 +36,10 @@ const COOLDOWN_MS = 8000; // per flag type, prevents duplicate spam
 const PHONE_SUSTAIN_MS = 2000;
 /** Likewise for a second face — people walk past doorways. */
 const MULTI_FACE_SUSTAIN_MS = 1500;
+/** Head must stay turned away this long before it reads as looking elsewhere. */
+const LOOK_AWAY_SUSTAIN_MS = 3000;
+/** Nose offset from the eye midpoint (relative to eye spacing) that reads as turned. */
+const LOOK_AWAY_RATIO = 0.34;
 /** Object-detector confidence floor. Deliberately high. */
 const PHONE_CONFIDENCE = 0.55;
 /** COCO classes that count as a handheld device. */
@@ -75,6 +79,7 @@ export function useProctoring({
   const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const phoneSinceRef = useRef<number | null>(null);
   const multiFaceSinceRef = useRef<number | null>(null);
+  const lookAwaySinceRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastDetectionRef = useRef(0);
@@ -101,11 +106,11 @@ export function useProctoring({
       if (!ctx) return resolve(null);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      canvas.toBlob(
-        (blob) => resolve(blob ? URL.createObjectURL(blob) : null),
-        "image/jpeg",
-        0.8
-      );
+      // A base64 data URL rather than an object URL: it renders locally the same
+      // way, but can also be POSTed to the backend on completion so the recruiter
+      // can re-verify the frame from their own session — an object URL can't leave
+      // the browser that made it. Quality kept modest to bound the payload size.
+      resolve(canvas.toDataURL("image/jpeg", 0.6));
     });
   }, [videoRef]);
 
@@ -219,9 +224,10 @@ export function useProctoring({
       lastDetectionRef.current = now;
 
       let count = 0;
+      let result: any = null;
       try {
         // detectForVideo requires a strictly increasing timestamp.
-        const result = detector.detectForVideo(video, now);
+        result = detector.detectForVideo(video, now);
         count = result.detections?.length ?? 0;
       } catch {
         return; // transient decode errors are not worth flagging
@@ -261,6 +267,7 @@ export function useProctoring({
 
       if (count > 1) {
         absentSinceRef.current = null;
+        lookAwaySinceRef.current = null;
         // Sustained, so someone crossing behind the candidate does not flag.
         if (multiFaceSinceRef.current === null) {
           multiFaceSinceRef.current = now;
@@ -270,6 +277,7 @@ export function useProctoring({
         }
       } else if (count === 0) {
         multiFaceSinceRef.current = null;
+        lookAwaySinceRef.current = null;
         // Debounced: a brief turn away shouldn't trip the flag.
         if (absentSinceRef.current === null) {
           absentSinceRef.current = now;
@@ -278,8 +286,30 @@ export function useProctoring({
           absentSinceRef.current = now; // restart window; cooldown handles spacing
         }
       } else {
+        // Exactly one face. Estimate whether the head is turned away from the
+        // screen — a rough proxy for reading an answer off to the side. Uses the
+        // nose position relative to the eye midpoint; deliberately conservative
+        // and sustained, since head pose from a bounding box is inherently noisy.
         absentSinceRef.current = null;
         multiFaceSinceRef.current = null;
+
+        const kp = result?.detections?.[0]?.keypoints;
+        if (kp && kp.length >= 3) {
+          const [rightEye, leftEye, noseTip] = kp;
+          const eyeSpan = Math.abs(leftEye.x - rightEye.x) || 0.0001;
+          const turnRatio = Math.abs(noseTip.x - (rightEye.x + leftEye.x) / 2) / eyeSpan;
+
+          if (turnRatio > LOOK_AWAY_RATIO) {
+            if (lookAwaySinceRef.current === null) {
+              lookAwaySinceRef.current = now;
+            } else if (now - lookAwaySinceRef.current > LOOK_AWAY_SUSTAIN_MS) {
+              raiseFlag("LOOKING_AWAY", "Candidate repeatedly looking away from the screen");
+              lookAwaySinceRef.current = now; // cooldown handles spacing
+            }
+          } else {
+            lookAwaySinceRef.current = null;
+          }
+        }
       }
     };
 

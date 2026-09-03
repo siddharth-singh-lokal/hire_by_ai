@@ -21,7 +21,8 @@ import { useSessionRecorder } from "@/hooks/useSessionRecorder";
 import {
   startSession,
   getSession as getEvidence,
-  ESCALATABLE_FLAGS,
+  attachClip,
+  PROBEABLE_FLAGS,
   RED_FLAG_WARNINGS,
   type RedFlag,
 } from "@/lib/sessionStore";
@@ -37,8 +38,14 @@ import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
  * Showing a candidate what they are being graded against changes their answers.
  */
 
-/** Grace after a warning before it escalates. */
-const STRIKE_GRACE_MS = 20000;
+/** Per-violation-type cooldown so the interviewer doesn't nag about the same thing. */
+const PROBE_COOLDOWN_MS = 25000;
+/** After time runs out, how long to let the candidate keep going before wrapping up. */
+const TIME_GRACE_MS = 3 * 60 * 1000;
+/** A lull this long (nobody speaking) after time is up is a safe moment to close. */
+const SETTLE_AFTER_SPEECH_MS = 4000;
+/** Length of the evidence clip recorded around each proctoring violation. */
+const CLIP_MS = 6000;
 
 function formatTime(secs: number): string {
   const m = Math.floor(Math.max(0, secs) / 60);
@@ -69,7 +76,9 @@ function InterviewRoom() {
     toggleMute,
     toggleVideo,
     sendControl,
+    sendTextMessage,
     endRequested,
+    concluded,
   } = useNovaSonicInterview(sessionId);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -79,6 +88,8 @@ function InterviewRoom() {
   const [isFinalising, setIsFinalising] = useState(false);
   const [showEndModal, setShowEndModal] = useState(false);
   const [warningBanner, setWarningBanner] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+  const [timeUp, setTimeUp] = useState(false);
 
   const totalSeconds = durationMinutes * 60;
   const [secondsRemaining, setSecondsRemaining] = useState(totalSeconds);
@@ -94,13 +105,22 @@ function InterviewRoom() {
 
   const { start: startRecording, stop: stopRecording, isRecording } = useSessionRecorder();
 
-  // --- integrity escalation -------------------------------------------------
-  // Two strikes, high-confidence flags only. The interviewer raises it in her
-  // own voice; a banner the candidate can ignore is not a warning.
-  const strikesRef = useRef(0);
-  const lastStrikeAtRef = useRef(0);
+  // --- integrity probing ----------------------------------------------------
+  // High-confidence flags never end the call — the interviewer just works a
+  // natural question about them into the conversation and keeps going.
+  const probedAtRef = useRef<Record<string, number>>({});
   const handledFlagsRef = useRef(new Set<string>());
   const endingRef = useRef(false);
+  const terminatingRef = useRef(false);
+  const isUserSpeakingRef = useRef(false);
+  const isAiSpeakingRef = useRef(false);
+  const lastVoiceAtRef = useRef(0);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const clipBusyRef = useRef(false);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
 
   const finishInterview = useCallback(
     async (reason?: string) => {
@@ -126,6 +146,10 @@ function InterviewRoom() {
             type: f.type,
             description: f.description,
             timeInSeconds: f.timeInSeconds,
+            // Base64 frame + short clip captured when the flag fired, so the
+            // recruiter can re-verify it later from their own machine.
+            snapshot: f.snapshotUrl,
+            clip: f.clipUrl,
           })),
           durationSeconds: getElapsedSeconds(),
           terminationReason: reason,
@@ -143,49 +167,82 @@ function InterviewRoom() {
     [stopRecording, endInterview, sessionId, getElapsedSeconds, candidateName, router]
   );
 
+  // One shared termination path so a goodbye is only ever spoken once — a
+  // candidate request and time running out can't stack up and make the
+  // interviewer say goodbye two or three times.
+  const requestTermination = useCallback(
+    (reason: string, wrapUp = false) => {
+      if (terminatingRef.current || endingRef.current) return;
+      terminatingRef.current = true;
+      setWarningBanner(
+        wrapUp ? "We're over time — please wrap up your final point." : "Wrapping up."
+      );
+      sendControl({ type: "terminate", reason, wrapUp });
+      // When we've asked the candidate to wrap up, give them (and the goodbye)
+      // longer before the client tears the call down, so nobody is cut off.
+      setTimeout(() => finishInterview(reason), wrapUp ? 16000 : 9000);
+    },
+    [sendControl, finishInterview]
+  );
+
+  // Records a short clip from the moment a violation fires, so the recruiter can
+  // watch what actually happened rather than trust a single frame. One at a time
+  // (the per-type cooldown already spaces flags out); a clip still recording when
+  // the interview ends is simply dropped.
+  const captureClip = useCallback((flag: RedFlag) => {
+    const stream = localStreamRef.current;
+    if (!stream || clipBusyRef.current || typeof MediaRecorder === "undefined") return;
+
+    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm", "video/mp4"].find((t) =>
+      MediaRecorder.isTypeSupported(t)
+    );
+    if (!mimeType) return;
+
+    try {
+      clipBusyRef.current = true;
+      const rec = new MediaRecorder(stream, { mimeType });
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      rec.onstop = () => {
+        clipBusyRef.current = false;
+        const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
+        const reader = new FileReader();
+        reader.onload = () => attachClip(flag.id, String(reader.result));
+        reader.readAsDataURL(blob);
+      };
+      rec.start();
+      setTimeout(() => {
+        if (rec.state !== "inactive") rec.stop();
+      }, CLIP_MS);
+    } catch (e) {
+      clipBusyRef.current = false;
+      console.error("Clip capture failed:", e);
+    }
+  }, []);
+
   const handleFlag = useCallback(
     (flag: RedFlag) => {
       if (handledFlagsRef.current.has(flag.id)) return;
       handledFlagsRef.current.add(flag.id);
 
-      // Only sustained, high-confidence violations escalate. Tab switches and
-      // brief absences are recorded for the recruiter but never end a call —
-      // a false positive there would be indefensible.
-      if (!ESCALATABLE_FLAGS.includes(flag.type)) return;
+      // Every flag gets a short evidence clip, whatever its type.
+      captureClip(flag);
+
+      // Tab switches and brief absences are recorded for the recruiter but never
+      // interrupt the conversation. The rest prompt the interviewer to ask about
+      // it in her own voice — she never ends the interview over a proctoring
+      // signal. Cooldown per type so she doesn't nag about the same thing.
+      if (!PROBEABLE_FLAGS.includes(flag.type)) return;
 
       const now = Date.now();
-      const withinGrace = now - lastStrikeAtRef.current < STRIKE_GRACE_MS;
+      if (now - (probedAtRef.current[flag.type] || 0) < PROBE_COOLDOWN_MS) return;
+      probedAtRef.current[flag.type] = now;
 
-      // A repeat inside the grace window is the same incident continuing, not a
-      // new one — that is what advances the strike count.
-      if (strikesRef.current > 0 && !withinGrace) {
-        strikesRef.current = 0;
-      }
-
-      strikesRef.current += 1;
-      lastStrikeAtRef.current = now;
-
-      if (strikesRef.current >= 3) {
-        setWarningBanner("Ending the interview.");
-        sendControl({ type: "terminate", reason: `integrity: ${flag.type}` });
-        setTimeout(() => finishInterview(`integrity: ${flag.type}`), 9000);
-        return;
-      }
-
-      setWarningBanner(
-        strikesRef.current === 1
-          ? "The interviewer has raised something about your setup."
-          : "Final warning — the interview will end if this continues."
-      );
-      setTimeout(() => setWarningBanner(null), 12000);
-
-      sendControl({
-        type: "proctor_warning",
-        strike: strikesRef.current,
-        description: RED_FLAG_WARNINGS[flag.type],
-      });
+      sendControl({ type: "proctor_probe", description: RED_FLAG_WARNINGS[flag.type] });
     },
-    [sendControl, finishInterview]
+    [sendControl, captureClip]
   );
 
   const { faceCount, isReady: proctoringReady, phoneVisible } = useProctoring({
@@ -197,12 +254,21 @@ function InterviewRoom() {
 
   // The candidate asked to stop. There is no signal left to gather.
   useEffect(() => {
-    if (!endRequested || endingRef.current) return;
+    if (!endRequested) return;
+    requestTermination("candidate requested");
+  }, [endRequested, requestTermination]);
+
+  // The interviewer said her closing line, so the interview is genuinely over.
+  // She already delivered the goodbye herself — give her audio a moment to finish
+  // playing, then close out. Deliberately not requestTermination: that would
+  // inject a second goodbye on top of the one she just said.
+  useEffect(() => {
+    if (!concluded || endingRef.current || terminatingRef.current) return;
+    terminatingRef.current = true;
     setWarningBanner("Wrapping up.");
-    sendControl({ type: "terminate", reason: "candidate requested" });
-    const t = setTimeout(() => finishInterview("candidate requested"), 9000);
+    const t = setTimeout(() => finishInterview("interview concluded"), 8000);
     return () => clearTimeout(t);
-  }, [endRequested, sendControl, finishInterview]);
+  }, [concluded, finishInterview]);
 
   useEffect(() => {
     if (isLive && localStream && !isRecording) {
@@ -221,14 +287,51 @@ function InterviewRoom() {
     return () => clearInterval(timer);
   }, [isLive, secondsRemaining]);
 
-  // Time is up — close it out rather than letting it run indefinitely.
+  // Track who is speaking so the time-up grace logic can tell a genuine lull from
+  // the candidate still being mid-answer.
   useEffect(() => {
-    if (isLive && secondsRemaining === 0 && !endingRef.current) {
-      sendControl({ type: "terminate", reason: "time elapsed" });
-      const t = setTimeout(() => finishInterview("time elapsed"), 9000);
-      return () => clearTimeout(t);
+    isUserSpeakingRef.current = isUserSpeaking;
+    isAiSpeakingRef.current = isAiSpeaking;
+    if (isUserSpeaking || isAiSpeaking) lastVoiceAtRef.current = Date.now();
+  }, [isUserSpeaking, isAiSpeaking]);
+
+  // Time is up — but never cut the candidate off mid-sentence. Tell the
+  // interviewer to stop starting new topics and wind down, and let the candidate
+  // keep going.
+  useEffect(() => {
+    if (isLive && secondsRemaining === 0 && !timeUp && !terminatingRef.current) {
+      setTimeUp(true);
+      setWarningBanner("We're at time — go ahead and finish your thought.");
+      sendControl({ type: "wind_down" });
     }
-  }, [isLive, secondsRemaining, sendControl, finishInterview]);
+  }, [isLive, secondsRemaining, timeUp, sendControl]);
+
+  // During the grace period, only actually close on a genuine lull. If the
+  // candidate is still going when the grace cap is reached, ask them to wrap up
+  // their final point, then end.
+  useEffect(() => {
+    if (!timeUp) return;
+    const graceStart = Date.now();
+    const check = setInterval(() => {
+      if (terminatingRef.current) {
+        clearInterval(check);
+        return;
+      }
+      const now = Date.now();
+      if (now - graceStart >= TIME_GRACE_MS) {
+        requestTermination("time elapsed (grace expired)", true);
+        clearInterval(check);
+      } else if (
+        !isUserSpeakingRef.current &&
+        !isAiSpeakingRef.current &&
+        now - lastVoiceAtRef.current >= SETTLE_AFTER_SPEECH_MS
+      ) {
+        requestTermination("time elapsed");
+        clearInterval(check);
+      }
+    }, 1000);
+    return () => clearInterval(check);
+  }, [timeUp, requestTermination]);
 
   useEffect(() => {
     if (transcriptScrollRef.current) {
@@ -420,7 +523,32 @@ function InterviewRoom() {
       </main>
 
       {/* Controls */}
-      <footer className="h-20 border-t border-slate-800/80 bg-slate-900/50 flex items-center justify-center gap-3 shrink-0">
+      <footer className="border-t border-slate-800/80 bg-slate-900/50 flex flex-col items-center justify-center gap-3 shrink-0 py-3 px-4">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!typed.trim()) return;
+            sendTextMessage(typed);
+            setTyped("");
+          }}
+          className="w-full max-w-xl flex items-center gap-2"
+        >
+          <input
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder="Type a reply instead of speaking (for testing)…"
+            className="flex-1 rounded-full bg-slate-950/60 border border-slate-800 focus:border-slate-600 focus:outline-none px-4 py-2 text-xs placeholder:text-slate-600"
+          />
+          <button
+            type="submit"
+            disabled={!typed.trim()}
+            className="px-4 py-2 rounded-full text-xs font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40"
+          >
+            Send
+          </button>
+        </form>
+
+        <div className="flex items-center justify-center gap-3">
         <button
           onClick={toggleMute}
           className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
@@ -457,6 +585,7 @@ function InterviewRoom() {
           )}
           {isFinalising ? "Finishing…" : "End"}
         </button>
+        </div>
       </footer>
 
       {showEndModal && (

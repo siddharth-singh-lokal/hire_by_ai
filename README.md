@@ -57,9 +57,9 @@ PHASE 2 — live call, ZERO retrieval
 | Task | Model | Why |
 |---|---|---|
 | Voice interview | `amazon.nova-2-sonic-v1:0` | Only speech-to-speech on Bedrock. Barge-in, plus text transcripts on the same stream |
-| Question bank | `us.anthropic.claude-opus-4-6-v1` | Quality-critical, runs once before the call |
-| Evaluation | `us.anthropic.claude-opus-4-6-v1` | Grading is the output that matters most |
-| Sanitize + validate | `us.anthropic.claude-sonnet-4-6` | Bulk workload; a *different* model from the writer, so blind spots aren't shared |
+| Question bank | `us.anthropic.claude-sonnet-4-6` | Benchmarked level with Opus 4.6 on the same transcript at a fraction of the cost; runs once before the call |
+| Evaluation | `us.anthropic.claude-sonnet-4-6` | Same structured output as Opus 4.6 on the transcript; Opus stays a one-line override when a decision warrants it |
+| Sanitize + validate | `us.anthropic.claude-sonnet-4-6` | Bulk offline workload; low-temperature extraction, not generation |
 
 Measured: **~1.8s** end-of-speech to first audio byte.
 
@@ -136,8 +136,9 @@ Proctoring flags feed the **authenticity** rating only. They are explicitly excl
 
 Deliberate scope cuts, not oversights:
 
-- **No S3, no database.** Recordings and snapshots are in-memory blob URLs; prepared sessions live in a `Map`. Both survive navigation, neither survives a restart.
+- **No S3, no database.** The recording stays an in-memory blob URL (same-tab only); red-flag snapshots are sent to the backend as base64 and persisted with the session so a recruiter can re-verify them from their own machine (which bloats `.sessions.json`). Prepared sessions live in a `Map`. Object storage is the real fix.
 - **Voice-only.** R0 tests reasoning, not implementation. R1 still tests code.
 - **Calibration is directional.** Validating against a handful of known engineers is evidence, not statistics.
 - **Local credentials.** The AWS profile only exists on the machine that configured it. Deploying needs real IAM.
-- **Phone detection not implemented.** Object detection for handheld devices false-positives on mugs and hands. A proctor that cries wolf is worse than one that stays quiet.
+
+Phone detection *is* implemented (`useProctoring.ts`), but guarded: a handheld device must be seen continuously for over two seconds before it flags, since object detection false-positives on mugs and hands. Only sustained multi-person and phone detections can escalate toward ending a call.

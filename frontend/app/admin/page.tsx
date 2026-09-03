@@ -29,9 +29,10 @@ import {
   type AdminSessionRow,
 } from "@/lib/api";
 
-type Duration = 5 | 15 | 30 | 45;
+type Duration = 1 | 5 | 15 | 30 | 45;
 
 const DURATION_COPY: Record<Duration, string> = {
+  1: "Smoke test — one quick question. For checking the flow end to end.",
   5: "Demo length. One claim to verify, one problem to reason about.",
   15: "1 project probe + 1 scenario + 1 gap probe. High-volume screening.",
   30: "2 project probes + 2 scenarios + a gap probe. Recommended.",
@@ -292,8 +293,8 @@ export default function AdminPage() {
                   <Clock className="w-3.5 h-3.5 text-slate-500" />
                   Interview length
                 </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {([5, 15, 30, 45] as Duration[]).map((d) => (
+                <div className="grid grid-cols-5 gap-2">
+                  {([1, 5, 15, 30, 45] as Duration[]).map((d) => (
                     <button
                       key={d}
                       onClick={() => setDuration(d)}

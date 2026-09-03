@@ -37,6 +37,9 @@ Exactly one question: is this person worth a senior engineer's hour in the next 
 
 You are NOT deciding whether to hire them. You are NOT assessing whether they meet the full bar for the role — later rounds do that with far more evidence than a ${bank.durationMinutes} minute conversation can provide. Overstating what a short screen establishes is the most common way this output misleads people.
 
+WHAT THIS OUTPUT IS FOR — AND ITS TONE
+This is a get-to-know-the-candidate tool, not a gate. The hiring manager wants a plain, honest picture: what this person is clearly good at, where they are lighter, and whether that shape fits the role's actual responsibilities. Keep it simple and readable. Lead with strengths, name weaknesses without inflating them, and say whether the fit looks right for THIS role. Be generous and fair — do not nitpick, do not be harsh, and do not turn a friendly conversation into a tribunal. A capable person having an ordinary chat should read as capable, not get picked apart over wording.
+
 HOW TO SCORE — read this carefully, it is where graders go wrong
 - **Absence of evidence is NOT negative evidence.** If a topic never came up, or came up only glancingly, that axis is "not established" — score it 3 (neutral) and say so in the justification. Do NOT score 1 or 2 because something went uncovered. A ${bank.durationMinutes} minute call cannot cover everything, and marking someone down for the interview's own gaps is a grading error, not a finding.
 - **Only score low when there is POSITIVE evidence of a problem** — a claim they could not back up, reasoning that was actually wrong, a requirement they were asked about directly and could not speak to.
@@ -79,6 +82,9 @@ ${
 ${redFlags.map((f) => `- [${f.type}] at ${f.timeInSeconds}s: ${f.description}`).join("\n")}`
     : "PROCTORING: no incidents recorded."
 }
+
+AUTHENTICITY — is the candidate answering in their own words?
+Separately from proctoring, judge whether the answers sound like this person's own live thinking. Signs someone may be reading from a script or another screen: answers that are unnaturally polished or textbook-verbatim for a spoken conversation, fluent set-piece definitions that fall apart the moment a specific follow-up is asked, oddly long pauses before suspiciously complete answers, or rehearsed depth paired with an inability to reason on the spot. If you genuinely see this, lower the authenticity rating and note it in redFlags with the quote. If you do not, do not manufacture suspicion — most people are simply answering, and nerves are not dishonesty.
 
 RULES
 - Any axis you score ABOVE OR BELOW 3 needs at least one VERBATIM quote from the candidate. If you cannot quote them, the honest score is 3 and the justification says the topic was not established.

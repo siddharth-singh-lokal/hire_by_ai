@@ -82,6 +82,8 @@ interface SonicSession {
   /** Guards against sending audio before promptStart, which Sonic rejects. */
   ready: boolean;
   closed: boolean;
+  /** Set once a termination goodbye has been injected, so it only happens once. */
+  terminating: boolean;
 }
 
 /**
@@ -151,6 +153,24 @@ function detectsEndIntent(text: string): boolean {
   return END_INTENT.some((re) => re.test(text));
 }
 
+/**
+ * Phrases the interviewer uses to close the interview. When she says one, the
+ * conversation is over — there is otherwise no signal to hang up on, so the call
+ * would sit open until the candidate happened to click End. Deliberately strong,
+ * unambiguous closings only, so a mid-interview "thanks" doesn't end it early.
+ */
+const CLOSING_INTENT = [
+  /\bteam will (?:be in touch|follow up|reach out|get back)\b/i,
+  /\bwe(?:'ll| will) be in touch\b/i,
+  /\bthat (?:concludes|wraps up|brings us to the end)\b/i,
+  /\bthank you (?:so much |very much )?for your time\b/i,
+  /\bbest of luck\b/i,
+];
+
+function detectsClosing(text: string): boolean {
+  return CLOSING_INTENT.some((re) => re.test(text));
+}
+
 export function attachNovaSonicRelay(server: Server): void {
   const wss = new WebSocketServer({ server, path: "/ws/interview" });
 
@@ -197,6 +217,7 @@ export function attachNovaSonicRelay(server: Server): void {
       audioContentName: randomUUID(),
       ready: false,
       closed: false,
+      terminating: false,
     };
 
     const send = (payload: any) => {
@@ -236,34 +257,66 @@ export function attachNovaSonicRelay(server: Server): void {
           break;
         }
 
-        // Proctoring escalation. The frontend detects the violation; the relay
-        // injects a note so Sarah raises it herself, in her own voice, mid
-        // conversation. A banner the candidate can ignore is not a warning.
-        case "proctor_warning": {
+        // Integrity observation. The frontend detects it; the relay injects a
+        // note so the interviewer works a brief, natural question about it into
+        // the conversation — in her own voice — and keeps going. The interview
+        // is NEVER ended over a proctoring signal: a false positive cutting off a
+        // real candidate would be indefensible.
+        case "proctor_probe": {
           if (!session.ready || session.closed) return;
-
-          const note =
-            msg.strike === 2
-              ? `SYSTEM NOTE — do not read this aloud verbatim. This is a SECOND warning. ${msg.description}. Tell the candidate firmly that this is the final warning and the interview will end if it continues. Two sentences, then return to the question.`
-              : `SYSTEM NOTE — do not read this aloud verbatim. ${msg.description}. Politely ask the candidate to correct this so the session stays valid. Stay calm and non-accusatory — it may be innocent. Two sentences, then return to the question.`;
-
-          injectSystemNote(session, note);
+          injectSystemNote(
+            session,
+            `SYSTEM NOTE — do not read this aloud verbatim, and do not say you were "notified" or "flagged". ${msg.description}. Work a short, natural question about this into the conversation to understand why — stay calm and non-accusatory, it may be entirely innocent. One or two sentences, then continue with your interview questions. Do NOT end the interview.`
+          );
           break;
         }
 
-        // The candidate asked to stop, or escalation ran out of strikes.
-        case "terminate": {
-          if (session.closed) return;
+        // Candidate typed a message instead of speaking (text-input test mode).
+        // Show and record it as their turn, then feed it to Sonic as a USER turn
+        // so the interviewer replies — the whole flow runs without a microphone.
+        case "text_input": {
+          if (!session.ready || session.closed) return;
+          const typed = String(msg.text || "").trim();
+          if (!typed) return;
+          send({ type: "transcript", sender: "candidate", text: typed });
+          appendTranscript(prepared.id, { sender: "candidate", text: typed, timestamp: Date.now() });
+          injectSystemNote(session, typed);
+          if (detectsEndIntent(typed)) send({ type: "end_requested" });
+          break;
+        }
+
+        // Time is up. Tell the interviewer to stop starting new topics and wind
+        // the conversation down — the candidate is never cut off mid-answer.
+        case "wind_down": {
+          if (!session.ready || session.closed) return;
           injectSystemNote(
             session,
-            `SYSTEM NOTE — do not read this aloud verbatim. The interview is ending now (${msg.reason || "requested"}). Thank the candidate warmly in one or two sentences and tell them the team will follow up. Do not explain the reason and do not ask further questions.`
+            `SYSTEM NOTE — do not read this aloud verbatim. You are now at time. Do NOT start any new topics or questions. Let the candidate finish whatever they are currently saying, then begin winding the conversation down naturally. Keep your turns short.`
           );
-          // Give her a moment to say goodbye before tearing the stream down.
-          setTimeout(() => {
-            if (session.closed) return;
-            closeSonicStream(session);
-            teardown(`terminated: ${msg.reason || "requested"}`);
-          }, 8000);
+          break;
+        }
+
+        // The candidate asked to stop, or the interview ran out of time. Guarded
+        // so overlapping triggers can't make the interviewer say goodbye twice.
+        case "terminate": {
+          if (session.closed || session.terminating) return;
+          session.terminating = true;
+          injectSystemNote(
+            session,
+            msg.wrapUp
+              ? `SYSTEM NOTE — do not read this aloud verbatim. You are over time and the candidate is still going. Warmly let them know you're now at time, ask them to finish their final point in a sentence or two, then thank them and tell them the team will follow up. Do not start anything new.`
+              : `SYSTEM NOTE — do not read this aloud verbatim. The interview is ending now (${msg.reason || "requested"}). Thank the candidate warmly in one or two sentences and tell them the team will follow up. Do not explain the reason and do not ask further questions.`
+          );
+          // Give her a moment to say goodbye before tearing the stream down —
+          // longer when we've asked the candidate to wrap up their final point.
+          setTimeout(
+            () => {
+              if (session.closed) return;
+              closeSonicStream(session);
+              teardown(`terminated: ${msg.reason || "requested"}`);
+            },
+            msg.wrapUp ? 15000 : 8000
+          );
           break;
         }
 
@@ -382,6 +435,8 @@ export function attachNovaSonicRelay(server: Server): void {
     // then hears the same warning twice.
     const recentlyEmitted: Record<string, string[]> = { candidate: [], interviewer: [] };
     const DEDUPE_WINDOW = 12;
+    // Fire the auto-end signal at most once, when she first says a closing line.
+    let concludedSent = false;
 
     (async () => {
       try {
@@ -433,6 +488,14 @@ export function attachNovaSonicRelay(server: Server): void {
               if (sender === "candidate" && detectsEndIntent(text)) {
                 console.log(`[Sonic] Candidate requested to end: "${text}"`);
                 send({ type: "end_requested" });
+              }
+
+              // The interviewer said her closing line — the interview is over.
+              // Signal the client to wind down once she has finished speaking.
+              if (sender === "interviewer" && !concludedSent && detectsClosing(text)) {
+                console.log(`[Sonic] Interviewer concluded: "${text}"`);
+                concludedSent = true;
+                send({ type: "concluded" });
               }
             }
           } else if (event.contentStart?.type === "AUDIO") {

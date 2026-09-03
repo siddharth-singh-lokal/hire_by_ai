@@ -102,7 +102,7 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       });
     }
 
-    const duration = ([5, 15, 30, 45] as const).includes(durationMinutes)
+    const duration = ([1, 5, 15, 30, 45] as const).includes(durationMinutes)
       ? (durationMinutes as InterviewDuration)
       : 30;
 
@@ -265,6 +265,7 @@ app.get("/api/scorecard/:id", (req: Request, res: Response) => {
       evaluation: session.scorecard,
       genericComparison: (session.scorecard as any).genericComparison || null,
       transcripts: session.transcripts,
+      redFlags: session.redFlags,
       terminationReason: session.terminationReason,
     });
   }

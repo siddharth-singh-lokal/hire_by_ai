@@ -42,6 +42,10 @@ export interface StoredRedFlag {
   type: string;
   description: string;
   timeInSeconds: number;
+  /** Base64 JPEG data URL captured when the flag fired, so the recruiter can re-verify it. */
+  snapshot?: string;
+  /** Base64 data URL of a short video clip around the violation. */
+  clip?: string;
 }
 
 export interface InterviewSession {

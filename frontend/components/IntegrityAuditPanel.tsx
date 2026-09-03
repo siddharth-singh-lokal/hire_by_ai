@@ -16,7 +16,7 @@ function formatTimestamp(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export const IntegrityAuditPanel: React.FC = () => {
+export const IntegrityAuditPanel: React.FC<{ flags?: RedFlag[] }> = ({ flags: flagsProp }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [flags, setFlags] = useState<RedFlag[]>([]);
@@ -28,8 +28,11 @@ export const IntegrityAuditPanel: React.FC = () => {
   useEffect(() => {
     const session = getSession();
     setRecordingUrl(session.recordingUrl);
-    setFlags(session.redFlags);
-  }, []);
+    // Prefer flags handed in from the graded session — that is what the recruiter
+    // sees on their own machine, where the local store is empty. Fall back to the
+    // in-memory store for a same-tab demo.
+    setFlags(flagsProp ?? session.redFlags);
+  }, [flagsProp]);
 
   const jumpTo = (flag: RedFlag) => {
     setActiveFlagId(flag.id);
@@ -109,7 +112,7 @@ export const IntegrityAuditPanel: React.FC = () => {
                   <button
                     onClick={() => setZoomed(flag)}
                     className="shrink-0 group relative"
-                    title="View captured frame"
+                    title={flag.clipUrl ? "Play evidence clip" : "View captured frame"}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -117,6 +120,11 @@ export const IntegrityAuditPanel: React.FC = () => {
                       alt={RED_FLAG_LABELS[flag.type]}
                       className="w-16 h-12 object-cover rounded-lg border border-slate-700 group-hover:border-amber-500/60"
                     />
+                    {flag.clipUrl && (
+                      <span className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-lg">
+                        <Play className="w-4 h-4 text-white drop-shadow" />
+                      </span>
+                    )}
                   </button>
                 ) : (
                   <div className="w-16 h-12 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
@@ -165,7 +173,7 @@ export const IntegrityAuditPanel: React.FC = () => {
                   {RED_FLAG_LABELS[zoomed.type]}
                 </p>
                 <p className="text-[11px] text-slate-500 font-mono">
-                  Captured at {formatTimestamp(zoomed.timeInSeconds)}
+                  {zoomed.clipUrl ? "Clip" : "Captured"} at {formatTimestamp(zoomed.timeInSeconds)}
                 </p>
               </div>
               <button
@@ -175,12 +183,22 @@ export const IntegrityAuditPanel: React.FC = () => {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={zoomed.snapshotUrl!}
-              alt={RED_FLAG_LABELS[zoomed.type]}
-              className="w-full max-h-[70vh] object-contain bg-black"
-            />
+            {zoomed.clipUrl ? (
+              <video
+                src={zoomed.clipUrl}
+                poster={zoomed.snapshotUrl || undefined}
+                controls
+                autoPlay
+                className="w-full max-h-[70vh] object-contain bg-black"
+              />
+            ) : (
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img
+                src={zoomed.snapshotUrl!}
+                alt={RED_FLAG_LABELS[zoomed.type]}
+                className="w-full max-h-[70vh] object-contain bg-black"
+              />
+            )}
           </div>
         </div>
       )}

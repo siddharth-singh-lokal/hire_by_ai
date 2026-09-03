@@ -18,19 +18,22 @@ export type RedFlagType =
   | "MULTIPLE_FACES_DETECTED"
   | "CANDIDATE_ABSENT"
   | "TAB_SWITCH_DETECTED"
-  | "PHONE_DETECTED";
+  | "PHONE_DETECTED"
+  | "LOOKING_AWAY";
 
 /**
- * Only these can escalate to a warning and eventually end the call.
+ * Only these prompt the interviewer to ask the candidate about it, live.
  *
- * Tab switches and brief absences are logged but never terminate: they are far
- * too easy to trigger innocently (a notification, glancing at a second monitor),
- * and ending a real candidate's interview over one would be indefensible. The
- * two that remain both require sustained detection before they fire at all.
+ * The interview is never ended over a proctoring signal — the interviewer just
+ * works a natural question into the conversation ("is someone with you?", "are
+ * you referring to notes?"). Tab switches and brief absences are recorded for
+ * the recruiter but never interrupt the conversation: they are far too easy to
+ * trigger innocently. The ones here all require sustained detection first.
  */
-export const ESCALATABLE_FLAGS: RedFlagType[] = [
+export const PROBEABLE_FLAGS: RedFlagType[] = [
   "MULTIPLE_FACES_DETECTED",
   "PHONE_DETECTED",
+  "LOOKING_AWAY",
 ];
 
 export interface RedFlag {
@@ -41,8 +44,10 @@ export interface RedFlag {
   timestamp: number;
   /** Offset into the recording, in seconds — drives "jump to time". */
   timeInSeconds: number;
-  /** Object URL of the JPEG snapshot (would be an S3 URL in production). */
+  /** Base64 data URL of the JPEG snapshot (would be an S3 URL in production). */
   snapshotUrl: string | null;
+  /** Base64 data URL of a short video clip around the violation, for re-verification. */
+  clipUrl?: string | null;
 }
 
 export const RED_FLAG_LABELS: Record<RedFlagType, string> = {
@@ -50,15 +55,18 @@ export const RED_FLAG_LABELS: Record<RedFlagType, string> = {
   CANDIDATE_ABSENT: "Candidate Left Frame",
   TAB_SWITCH_DETECTED: "Navigated Away From Tab",
   PHONE_DETECTED: "Phone In Frame",
+  LOOKING_AWAY: "Looking Away From Screen",
 };
 
-/** What the interviewer is told to say when raising this with the candidate. */
+/** What the interviewer is told she is seeing, so she can ask about it naturally. */
 export const RED_FLAG_WARNINGS: Record<RedFlagType, string> = {
   MULTIPLE_FACES_DETECTED:
-    "Someone else appears to be in the room, visible on camera",
+    "Another person seems to be in the room or on camera with the candidate, and there may be a second voice",
   CANDIDATE_ABSENT: "The candidate has moved out of camera view",
   TAB_SWITCH_DETECTED: "The candidate has navigated away from the interview tab",
-  PHONE_DETECTED: "A phone or handheld device is visible in the camera frame",
+  PHONE_DETECTED: "The candidate appears to be looking at or using a phone or handheld device",
+  LOOKING_AWAY:
+    "The candidate keeps looking away from the screen, as if reading an answer from somewhere else",
 };
 
 interface SessionEvidence {
@@ -99,6 +107,12 @@ export function clearSession(): void {
 
 export function recordFlag(flag: RedFlag): void {
   session.redFlags.push(flag);
+}
+
+/** Attaches a short video clip to a flag once its recording finishes (a few seconds later). */
+export function attachClip(flagId: string, clipUrl: string): void {
+  const flag = session.redFlags.find((f) => f.id === flagId);
+  if (flag) flag.clipUrl = clipUrl;
 }
 
 export function setRecording(blob: Blob, durationSeconds: number): void {

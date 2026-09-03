@@ -19,6 +19,7 @@ import {
 import { useSearchParams } from "next/navigation";
 import { IntegrityAuditPanel } from "@/components/IntegrityAuditPanel";
 import { fetchScorecard, regradeInterview, BACKEND_URL } from "@/lib/api";
+import type { RedFlag } from "@/lib/sessionStore";
 
 const VERDICT_STYLE: Record<string, string> = {
   Advance: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
@@ -64,6 +65,7 @@ function Scorecard() {
   const [evaluation, setEvaluation] = useState<any>(null);
   const [generic, setGeneric] = useState<any>(null);
   const [transcripts, setTranscripts] = useState<any[]>([]);
+  const [flags, setFlags] = useState<RedFlag[]>([]);
   const [tab, setTab] = useState<"evidence" | "gaps" | "transcript">("evidence");
 
   const run = useCallback(async () => {
@@ -82,6 +84,17 @@ function Scorecard() {
         setEvaluation(result.evaluation);
         setGeneric(result.genericComparison || null);
         setTranscripts(result.transcripts || []);
+        setFlags(
+          (result.redFlags || []).map((f, i) => ({
+            id: `flag_${i}`,
+            type: f.type,
+            description: f.description,
+            timestamp: 0,
+            timeInSeconds: f.timeInSeconds,
+            snapshotUrl: f.snapshot ?? null,
+            clipUrl: f.clip ?? null,
+          })) as RedFlag[]
+        );
         setLoading(false);
       } else if (result.status === "failed") {
         setError(result.message || "Grading failed for this interview.");
@@ -160,7 +173,6 @@ function Scorecard() {
   }
 
   const briefing = evaluation.r1Briefing || { skip: [], probe: [], suggestedOpener: "" };
-  const scoreDelta = generic ? evaluation.overallScore - generic.overallScore : 0;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -410,55 +422,31 @@ function Scorecard() {
             </div>
           </section>
 
-          {/* Counterfactual */}
+          {/* Counterfactual — deliberately a small footnote. The verdict in the
+              header is the real one; this is only a baseline to show the org
+              grounding is doing real work, and must never read as the decision. */}
           {generic && (
-            <section className="rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden">
-              <div className="px-5 py-4 border-b border-slate-800">
-                <h2 className="text-sm font-bold flex items-center gap-2">
-                  <Scale className="w-4 h-4 text-slate-400" />
-                  Does the org context matter?
-                </h2>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Same transcript, scored both ways.
-                </p>
-              </div>
-
-              <div className="p-5 space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="p-3 rounded-xl bg-slate-950/50 border border-slate-800">
-                    <p className="text-[10px] text-slate-500 mb-1">Generic rubric</p>
-                    <p className="text-sm font-bold text-slate-300">{generic.verdict}</p>
-                    <p className="text-[11px] text-slate-500">{generic.overallScore}/100</p>
-                  </div>
-                  <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/30">
-                    <p className="text-[10px] text-emerald-500/80 mb-1">Org-grounded</p>
-                    <p className="text-sm font-bold text-emerald-300">{evaluation.verdict}</p>
-                    <p className="text-[11px] text-emerald-500/70">
-                      {evaluation.overallScore}/100
-                    </p>
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  {scoreDelta !== 0 ? (
-                    <>
-                      A {Math.abs(scoreDelta)}-point{" "}
-                      {scoreDelta < 0 ? "lower" : "higher"} read once the role's own
-                      requirements are applied.{" "}
-                    </>
-                  ) : null}
-                  The generic rubric has no axis for what this JD actually asks for, so it
-                  cannot see the gaps below.
-                </p>
-
-                <p className="text-[11px] text-slate-500 italic leading-relaxed border-t border-slate-800 pt-3">
-                  {generic.summary}
-                </p>
-              </div>
+            <section className="rounded-xl border border-slate-800/70 bg-slate-900/30 p-4">
+              <p className="text-[10px] uppercase font-bold text-slate-600 tracking-wider mb-1.5">
+                Sanity-check baseline · not the decision
+              </p>
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Scored with a generic rubric that knows nothing about this role, the same
+                transcript reads as{" "}
+                <span className="text-slate-400 font-medium">
+                  {generic.verdict} ({generic.overallScore}/100)
+                </span>
+                . The verdict to trust is{" "}
+                <span className="text-slate-300 font-medium">
+                  {evaluation.verdict} ({evaluation.overallScore}/100)
+                </span>{" "}
+                — the one calibrated to this JD. The gap is the value the org grounding adds; it
+                is not a second opinion to average in.
+              </p>
             </section>
           )}
 
-          <IntegrityAuditPanel />
+          <IntegrityAuditPanel flags={flags} />
 
           <p className="text-[10px] text-slate-600 leading-relaxed px-1">
             Evidence for a human decision — not a hiring decision. Scored by{" "}

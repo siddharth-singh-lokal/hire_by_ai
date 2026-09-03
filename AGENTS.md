@@ -76,7 +76,7 @@ server, build, restart.
 JD           -> which competencies to test, the bar, culture criteria
 Resume       -> which claims to verify, which projects to probe
 Context Pack -> what the scenarios testing those competencies are MADE OF
-Duration     -> how many probes actually fit (5 / 15 / 30 / 45)
+Duration     -> how many probes actually fit (1 / 5 / 15 / 30 / 45; 1 is a smoke test)
 ```
 
 The pack is the **setting, never the syllabus**. Candidates are never quizzed on
@@ -132,8 +132,20 @@ nobody reviewed — refusing is the honest outcome.
 ### Nova Sonic protocol
 
 - **Exactly one SYSTEM content block per prompt.** A second returns
-  `Duplicate SYSTEM content`. Mid-conversation injections (proctoring warnings,
-  termination) must use `role: "USER"` — see `injectSystemNote`.
+  `Duplicate SYSTEM content`. Mid-conversation injections (proctoring probes,
+  typed candidate turns, termination) must use `role: "USER"` — see `injectSystemNote`.
+- **Text-input test mode.** The client can send `{type:"text_input"}` and the
+  relay feeds it in as a candidate USER turn, so the whole flow (reply, ending,
+  grading) runs without a microphone. The interview room shows a text box for this.
+- **Time-up is graceful, never a hard cut.** When the clock hits 0 the client
+  sends `wind_down` (stop new topics, wind down) and only closes on a real lull —
+  neither party speaking for a few seconds. A 3-minute grace cap then sends
+  `terminate` with `wrapUp:true`, asking the candidate to finish their final point
+  before the goodbye. `terminate` is single-shot (`session.terminating`).
+- **Auto-end on conclusion.** A finished interview would otherwise sit open until
+  someone clicked End. When the interviewer says a closing line (`detectsClosing`
+  in the relay) it sends `concluded`; the client waits ~8s for her audio to finish,
+  then closes — without injecting a second goodbye (she already said it).
 - **Its VAD needs continuous audio, including silence.** Muting must zero the
   samples, not stop the stream. Stop sending and it never detects end-of-turn,
   so it never replies — the interview silently hangs.
@@ -161,8 +173,14 @@ withholding them costs nothing.
   and then outputs silence — heard as speech chopping mid-word. `PRIME_SAMPLES`
   in `playback-processor.js` holds the cushion.
 - **A barge-in flush discards buffered speech**, so a spurious one cuts the
-  interviewer off regardless of buffering. `BARGE_IN_SUSTAIN_MS` guards against
-  echo from speakers triggering it.
+  interviewer off regardless of buffering. Echo from speakers is the usual cause
+  of constant mid-sentence interruptions. Two guards: while she speaks the mic is
+  gated (`BARGE_GATE` in `mic-processor.js` — residual echo below it is sent as
+  silence, so Sonic never hears it as a barge-in), and any flush Sonic does send
+  is ignored unless the mic was genuinely loud for `BARGE_IN_SUSTAIN_MS`.
+  Headphones remove the echo entirely and make both a no-op. Note: switching the
+  LLM does nothing here, and OpenRouter can't help — it has no realtime S2S audio;
+  the only S2S alternatives are OpenAI Realtime or Gemini Live.
 - Live diagnostics: `__round0Audio` in the browser console.
 
 ### Context Pack
@@ -183,9 +201,17 @@ withholding them costs nothing.
 
 - Phone detection requires **2s sustained** detection. Object detectors
   false-positive on mugs, notebooks and hands.
-- Only `MULTIPLE_FACES_DETECTED` and `PHONE_DETECTED` can escalate toward ending
-  a call (`ESCALATABLE_FLAGS`). Tab switches and brief absences log only — ending
-  a real candidate's interview on a false positive would be indefensible.
+- Proctoring never ends a call. `PROBEABLE_FLAGS` (`MULTIPLE_FACES_DETECTED`,
+  `PHONE_DETECTED`, `LOOKING_AWAY`) make the interviewer ask about it live, in her
+  own voice (`proctor_probe` → `injectSystemNote`), then continue. Tab switches
+  and brief absences are logged for the recruiter only. Ending a real candidate's
+  interview on a false positive would be indefensible — earlier strike-to-terminate
+  logic was removed for exactly this reason.
+- `LOOKING_AWAY` is a best-effort head-pose heuristic (nose vs. eye-midpoint from
+  the face keypoints), deliberately conservative and sustained; it flags "may be
+  reading from elsewhere" but is noisier than face-count or phone detection.
+- The grader also judges authenticity from the transcript — answers that read as
+  recited/scripted lower authenticity — independently of any proctoring flag.
 - MediaPipe `detectForVideo` is **synchronous on the main thread**. Adding more
   detectors or raising the rate starves the WebSocket handler and degrades audio.
 
@@ -212,7 +238,12 @@ reading code. Reading the code would not have revealed any of them.
 
 ## Prototype limitations (deliberate)
 
-- No S3. Recordings and snapshots are in-memory blob URLs, lost on refresh.
+- No S3. The full recording stays an in-memory blob URL (same-tab only). Per-flag
+  evidence — a JPEG snapshot AND a short (~6s) video clip recorded from the moment
+  the violation fires — is sent to the backend as base64 on completion and
+  persisted with the session, so the recruiter can re-verify from their own machine.
+  This bloats `.sessions.json`; real deployments should move it all to object
+  storage. A clip still recording when the interview ends is simply dropped.
 - No database. `.sessions.json` is a convenience mirror, not storage — no
   concurrency control, rewrites the whole file per change.
 - No auth on `/admin`.

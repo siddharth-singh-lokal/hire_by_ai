@@ -22,7 +22,7 @@ import { ContextPack } from "./contextPack/types";
 
 const PACK_PATH = path.join(__dirname, "contextPack", "context-pack.json");
 
-export type InterviewDuration = 5 | 15 | 30 | 45;
+export type InterviewDuration = 1 | 5 | 15 | 30 | 45;
 
 /** Fixed axes keep candidates comparable; generated axes keep the role honest. */
 export const FIXED_RUBRIC_AXES = [
@@ -80,6 +80,8 @@ export interface QuestionBank {
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
 const DURATION_PLAN: Record<InterviewDuration, { projects: number; scenarios: number; gaps: number }> = {
+  // 1 is a smoke-test length for checking the flow end to end: a single probe.
+  1: { projects: 1, scenarios: 0, gaps: 0 },
   // 5 is a demo/taster length: one claim to verify, one problem to reason about.
   5: { projects: 1, scenarios: 1, gaps: 0 },
   15: { projects: 1, scenarios: 1, gaps: 1 },
@@ -131,6 +133,7 @@ ${JSON.stringify(
 )}
 
 USING THE SCENARIOS
+- Only use a scenario whose competencies match THIS candidate's domain. The scenarios below may skew toward one kind of engineering; if none of them fit this role, do NOT force them — generate scenario questions from the JD's own field instead. A backend-infrastructure scenario is the wrong question for a frontend, mobile, or analytics candidate.
 - Choose scenarios whose difficulty matches the seniority in the JD. Difficulty 0-1 for intern/junior, 2-3 for mid/senior, 3-4 for staff/lead.
 - Adapt the wording so it reads as a natural interview question, but do not invent technical detail that is not in the scenario.
 - Set "scenarioId" to the scenario you drew from.
@@ -156,6 +159,9 @@ CALIBRATE ACCORDINGLY
 - Do NOT design questions whose purpose is to find the edge of someone's knowledge. Finding the edge is the next round's job.
 - A missing skill is not a failure. People learn on the job. Only test what the role genuinely requires from day one.
 - Keep the tone warm and collegial. This is a conversation between engineers, not an examination.
+
+STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
+Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
 ${packSection}
 
 DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.scenarios} scenario question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
@@ -237,6 +243,7 @@ function normaliseAxis(a: any): RubricAxis {
 
 /** Intro plus wrap-up. Real minutes the questions never get. */
 const OVERHEAD_MINUTES_BY_DURATION: Record<InterviewDuration, number> = {
+  1: 0,
   5: 1,
   15: 3,
   30: 4,
@@ -364,6 +371,7 @@ KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or thr
 - Adapt. If an answer is strong, use the escalation and go deeper. If they are floundering, use the fallback or move on — grinding someone down produces no signal and is unpleasant.
 - Probe vague answers once: "can you be more specific about how you did that?" Accept the second answer and move on.
 - Stay conversational. This is a discussion between engineers, not an interrogation. Brief acknowledgements are fine; long monologues are not.
+- Stay inside the candidate's field. The questions above are already scoped to their role; ask those, and if you improvise a follow-up keep it in their domain. Never drift into backend, infrastructure, or distributed-systems topics unless this is a backend/infra role.
 - NEVER state what you are assessing, what a good answer contains, or what you were hoping they would say — not before, during, or after a question. If they ask how they did, say the team will follow up.
 - If the candidate asks about internal systems, company specifics, or anything you were not given, say you cannot go into detail and return to the question. You genuinely do not have that information.
 - Close by thanking them and telling them the team will follow up.

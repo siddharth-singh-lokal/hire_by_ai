@@ -88,6 +88,37 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
   const pulseScale = 1 + Math.min(aiVolume * 0.35, 0.35);
   const glowIntensity = Math.min(aiVolume * 50, 45);
 
+  // Honest status. The old badge collapsed every non-active state into
+  // "Connecting…", so a hard failure (bad session, Nova Sonic error, dropped
+  // socket) looked identical to still connecting — which is exactly why a broken
+  // connection was impossible to tell apart from a slow one.
+  const isError = connectionState === "error";
+  const isDisconnected = connectionState === "disconnected";
+  const dotClass = isError
+    ? "bg-rose-500"
+    : isDisconnected
+    ? "bg-slate-500"
+    : isAiSpeaking
+    ? "bg-indigo-400 animate-ping"
+    : isUserSpeaking
+    ? "bg-emerald-400 animate-pulse"
+    : connectionState === "active"
+    ? "bg-emerald-500"
+    : "bg-amber-500 animate-pulse";
+  const statusLabel = isError
+    ? "Connection failed — see the message below"
+    : isDisconnected
+    ? "Disconnected"
+    : connectionState === "requesting_permission"
+    ? "Requesting mic & camera…"
+    : connectionState !== "active"
+    ? "Connecting…"
+    : isAiSpeaking
+    ? "Sarah Chen is speaking..."
+    : isUserSpeaking
+    ? "Listening to Candidate..."
+    : "Ready & Listening";
+
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-center p-6 select-none">
       {/* Background ambient radial glow */}
@@ -158,30 +189,14 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
       {/* State & Speaker Badge */}
       <div className="mt-3 relative z-10 flex flex-col items-center">
         <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/80 border border-slate-700/60 text-xs shadow-inner">
-          <div
-            className={`w-2 h-2 rounded-full ${
-              isAiSpeaking
-                ? "bg-indigo-400 animate-ping"
-                : isUserSpeaking
-                ? "bg-emerald-400 animate-pulse"
-                : connectionState === "active"
-                ? "bg-emerald-500"
-                : "bg-amber-500 animate-pulse"
-            }`}
-          />
-          <span className="font-medium text-slate-300">
-            {connectionState !== "active"
-              ? "Connecting…"
-              : isAiSpeaking
-              ? "Sarah Chen is speaking..."
-              : isUserSpeaking
-              ? "Listening to Candidate..."
-              : "Ready & Listening"}
+          <div className={`w-2 h-2 rounded-full ${dotClass}`} />
+          <span className={`font-medium ${isError ? "text-rose-300" : "text-slate-300"}`}>
+            {statusLabel}
           </span>
         </div>
 
         <p className="text-[11px] text-slate-400 mt-1">
-          Full-duplex audio • Low-latency server VAD • Live Whisper-1
+          Full-duplex audio • Server VAD • Amazon Nova Sonic
         </p>
       </div>
     </div>

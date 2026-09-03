@@ -52,6 +52,8 @@ export interface UseNovaSonicInterviewReturn {
   sendControl: (message: Record<string, unknown>) => void;
   /** Set when Sonic hears the candidate ask to stop. */
   endRequested: boolean;
+  /** Set when the interviewer says her closing line — the interview is over. */
+  concluded: boolean;
 }
 
 const MIC_SAMPLE_RATE = 16000; // what Nova Sonic accepts
@@ -73,8 +75,8 @@ const METER_INTERVAL_MS = 50;
  * Guard: only honour a flush if the local microphone has been genuinely loud
  * for a sustained stretch. Real speech sustains; an echo transient does not.
  */
-const BARGE_IN_LEVEL = 0.06;
-const BARGE_IN_SUSTAIN_MS = 250;
+const BARGE_IN_LEVEL = 0.08;
+const BARGE_IN_SUSTAIN_MS = 220;
 
 /**
  * Live audio diagnostics, readable from the console as `__round0Audio`.
@@ -129,6 +131,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const [aiVolume, setAiVolume] = useState(0);
   const [userVolume, setUserVolume] = useState(0);
   const [endRequested, setEndRequested] = useState(false);
+  const [concluded, setConcluded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micContextRef = useRef<AudioContext | null>(null);
@@ -204,6 +207,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     setError(null);
     closingRef.current = false;
     setEndRequested(false);
+    setConcluded(false);
     setConnectionState("requesting_permission");
 
     try {
@@ -234,6 +238,77 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       const ws = new WebSocket(backendWsUrl(sessionId));
       wsRef.current = ws;
 
+      // Wire the message/close handlers up BEFORE awaiting open, and keep them.
+      // The relay can reject a connection the instant it opens — a missing or
+      // expired prepared session sends an error then closes immediately. If these
+      // are attached only after the open resolves (and after the audio nodes are
+      // built), that first error and close land in the gap and are dropped,
+      // leaving the UI stuck on "Connecting…" forever with no error shown.
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case "ready":
+            setConnectionState("active");
+            break;
+
+          case "audio": {
+            diagnosticsRef.current.chunksReceived++;
+            const bytes = fromBase64(msg.data);
+            playbackNodeRef.current?.port.postMessage(
+              { type: "push", pcm: bytes.buffer },
+              [bytes.buffer]
+            );
+            break;
+          }
+
+          case "transcript":
+            appendTranscript(msg.sender, msg.text);
+            break;
+
+          case "end_requested":
+            setEndRequested(true);
+            break;
+
+          case "concluded":
+            setConcluded(true);
+            break;
+
+          case "interrupted": {
+            const loudFor = loudSinceRef.current ? Date.now() - loudSinceRef.current : 0;
+            if (loudFor >= BARGE_IN_SUSTAIN_MS) {
+              diagnosticsRef.current.flushesHonoured++;
+              playbackNodeRef.current?.port.postMessage({ type: "flush" });
+              setIsAiSpeaking(false);
+              setAiVolume(0);
+            } else {
+              diagnosticsRef.current.flushesIgnored++;
+              console.warn(
+                `[audio] ignored spurious barge-in (mic loud for only ${loudFor}ms) — ` +
+                  `total ignored: ${diagnosticsRef.current.flushesIgnored}`
+              );
+            }
+            break;
+          }
+
+          case "error":
+            setError(msg.message || "The interview stream failed.");
+            setConnectionState("error");
+            break;
+
+          case "closed":
+            if (!closingRef.current) setConnectionState("disconnected");
+            break;
+        }
+      };
+
+      ws.onclose = () => {
+        // Don't clobber a surfaced error with a generic "disconnected".
+        if (!closingRef.current) {
+          setConnectionState((s) => (s === "error" ? s : "disconnected"));
+        }
+      };
+
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
           () => reject(new Error("Timed out connecting to the interview relay.")),
@@ -260,6 +335,8 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
           // immediate or the orb lags behind the voice.
           setIsAiSpeaking(playing);
           if (!playing) setAiVolume(0);
+          // Close the mic gate while she speaks so her echo can't self-interrupt.
+          micNodeRef.current?.port.postMessage({ type: "remoteSpeaking", value: playing });
         } else if (type === "level") {
           const now = performance.now();
           if (now - lastAiMeterRef.current >= METER_INTERVAL_MS) {
@@ -313,70 +390,6 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         }
       };
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-
-        switch (msg.type) {
-          case "ready":
-            setConnectionState("active");
-            break;
-
-          case "audio": {
-            diagnosticsRef.current.chunksReceived++;
-            const bytes = fromBase64(msg.data);
-            playbackNodeRef.current?.port.postMessage(
-              { type: "push", pcm: bytes.buffer },
-              [bytes.buffer]
-            );
-            break;
-          }
-
-          case "transcript":
-            appendTranscript(msg.sender, msg.text);
-            break;
-
-          case "end_requested":
-            // Sonic heard the candidate ask to stop. The page decides what to
-            // do; the hook only reports it.
-            setEndRequested(true);
-            break;
-
-          case "interrupted": {
-            const loudFor = loudSinceRef.current ? Date.now() - loudSinceRef.current : 0;
-
-            if (loudFor >= BARGE_IN_SUSTAIN_MS) {
-              // Genuine interruption — drop buffered speech immediately.
-              diagnosticsRef.current.flushesHonoured++;
-              playbackNodeRef.current?.port.postMessage({ type: "flush" });
-              setIsAiSpeaking(false);
-              setAiVolume(0);
-            } else {
-              // Almost certainly the interviewer's own voice echoing back into
-              // the mic. Flushing here would cut her off mid-word for no reason.
-              diagnosticsRef.current.flushesIgnored++;
-              console.warn(
-                `[audio] ignored spurious barge-in (mic loud for only ${loudFor}ms) — ` +
-                  `total ignored: ${diagnosticsRef.current.flushesIgnored}`
-              );
-            }
-            break;
-          }
-
-          case "error":
-            setError(msg.message || "The interview stream failed.");
-            setConnectionState("error");
-            break;
-
-          case "closed":
-            if (!closingRef.current) setConnectionState("disconnected");
-            break;
-        }
-      };
-
-      ws.onclose = () => {
-        if (!closingRef.current) setConnectionState("disconnected");
-      };
-
       // Exposed for diagnosing audio complaints from a real session:
       //   > __round0Audio
       if (typeof window !== "undefined") {
@@ -422,12 +435,14 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     });
   }, []);
 
-  /**
-   * The candidate turn is audio-only, so there is no text channel to type into
-   * mid-session. Kept so the interface stays stable if that changes.
-   */
-  const sendTextMessage = useCallback((_text: string) => {
-    console.warn("[NovaSonic] Text input is not supported on the speech-to-speech stream.");
+  const sendTextMessage = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    // Testing aid: feed a typed candidate turn into the live relay so the whole
+    // flow (interviewer reply, ending, grading) runs without speaking.
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "text_input", text: trimmed }));
+    }
   }, []);
 
   const sendControl = useCallback((message: Record<string, unknown>) => {
@@ -462,5 +477,6 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     cancelAiResponse,
     sendControl,
     endRequested,
+    concluded,
   };
 }
