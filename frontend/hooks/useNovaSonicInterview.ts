@@ -441,7 +441,9 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
           // The buffer ran dry mid-speech. If this climbs during a session, the
           // cause is delivery (network or a blocked main thread), not barge-in.
           diagnosticsRef.current.underruns = e.data.count;
-          console.warn(`[audio] playback underrun #${e.data.count}`);
+          console.warn(
+            `[audio] playback underrun #${e.data.count} — jitter buffer now primes at ${e.data.primeMs}ms`
+          );
         }
       };
 

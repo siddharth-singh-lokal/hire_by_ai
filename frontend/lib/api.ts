@@ -81,6 +81,9 @@ export interface AdminSessionRow {
   overallScore?: number;
   transcriptCount?: number;
   gradingError?: string;
+  streamDrops?: number;
+  screenQuality?: "clean" | "degraded" | "compromised";
+  rescreenRecommended?: boolean;
 }
 
 export async function listAdminSessions(): Promise<AdminSessionRow[]> {

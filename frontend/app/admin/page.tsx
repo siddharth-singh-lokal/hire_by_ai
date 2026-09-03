@@ -519,11 +519,22 @@ export default function AdminPage() {
                       {s.status.replace("_", " ")}
                     </span>
 
-                    <div className="shrink-0 w-40 text-right">
+                    <div className="shrink-0 w-44 text-right">
                       {s.verdict ? (
                         <>
                           <p className="text-[11px] font-semibold text-slate-200">{s.verdict}</p>
-                          <p className="text-[10px] text-slate-500">{s.overallScore}/100</p>
+                          <p className="text-[10px] text-slate-500">
+                            {s.overallScore}/100
+                            {s.rescreenRecommended ? (
+                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 font-semibold">
+                                re-screen
+                              </span>
+                            ) : s.screenQuality && s.screenQuality !== "clean" ? (
+                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 font-semibold">
+                                {s.streamDrops} drop{s.streamDrops === 1 ? "" : "s"}
+                              </span>
+                            ) : null}
+                          </p>
                         </>
                       ) : s.gradingError ? (
                         <p className="text-[10px] text-rose-400">grading failed</p>

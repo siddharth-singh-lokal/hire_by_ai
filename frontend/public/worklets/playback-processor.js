@@ -26,6 +26,17 @@
 
 const SOURCE_RATE = 24000;
 const PRIME_SECONDS = 0.2;
+/**
+ * The prime is adaptive. 200ms is right for a clean delivery path, but the
+ * path is not always clean: the relay's event loop can stall, the browser's
+ * main thread can be held by a detector pass, and Bedrock's gaps between
+ * bursts have a long tail. Every underrun is a ramp-down/ramp-up pair — heard
+ * as a crackle — so after each one the cushion for the NEXT turn grows by half,
+ * up to this cap. Latency is traded for continuity only once continuity has
+ * actually been lost.
+ */
+const MAX_PRIME_SECONDS = 0.6;
+const PRIME_GROWTH = 1.5;
 const FADE_SECONDS = 0.002; // inaudible, but kills the click
 const DRY_SECONDS = 1.0; // shorter and an ordinary gap re-primes mid-sentence
 const LEVEL_INTERVAL_QUANTA = 8;
@@ -42,6 +53,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 
     this.ratio = SOURCE_RATE / sampleRate;
     this.primeSamples = Math.round(SOURCE_RATE * PRIME_SECONDS);
+    this.maxPrimeSamples = Math.round(SOURCE_RATE * MAX_PRIME_SECONDS);
     this.fadeFrames = Math.max(1, Math.round(sampleRate * FADE_SECONDS));
     this.dryLimit = Math.round(sampleRate * DRY_SECONDS);
 
@@ -155,7 +167,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       if (!this.inUnderrun) {
         this.inUnderrun = true;
         this.underruns++;
-        this.port.postMessage({ type: "underrun", count: this.underruns });
+        this.primeSamples = Math.min(
+          this.maxPrimeSamples,
+          Math.round(this.primeSamples * PRIME_GROWTH)
+        );
+        this.port.postMessage({
+          type: "underrun",
+          count: this.underruns,
+          primeMs: Math.round((this.primeSamples / SOURCE_RATE) * 1000),
+        });
       }
       this.dryFrames += out.length;
       if (this.dryFrames >= this.dryLimit) {

@@ -214,6 +214,51 @@ function Scorecard() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-8 items-start">
         <div className="space-y-6 min-w-0">
+          {/* Call quality — shown before anything else when the platform, not the
+              candidate, shaped this transcript. A recruiter must never reject
+              someone because the voice stream dropped four times. */}
+          {evaluation.screenQuality && evaluation.screenQuality !== "clean" && (
+            <section
+              className={`p-4 rounded-2xl border flex gap-3 ${
+                evaluation.screenQuality === "compromised"
+                  ? "bg-rose-500/10 border-rose-500/40"
+                  : "bg-amber-500/10 border-amber-500/40"
+              }`}
+            >
+              <AlertCircle
+                className={`w-5 h-5 shrink-0 mt-0.5 ${
+                  evaluation.screenQuality === "compromised" ? "text-rose-300" : "text-amber-300"
+                }`}
+              />
+              <div className="min-w-0">
+                <p
+                  className={`text-xs font-bold ${
+                    evaluation.screenQuality === "compromised" ? "text-rose-200" : "text-amber-200"
+                  }`}
+                >
+                  {evaluation.screenQuality === "compromised"
+                    ? "This screen was compromised by connection problems"
+                    : "This screen had connection problems"}
+                  {typeof evaluation.streamDrops === "number" && evaluation.streamDrops > 0
+                    ? ` — the voice stream dropped ${evaluation.streamDrops} time${
+                        evaluation.streamDrops === 1 ? "" : "s"
+                      }`
+                    : ""}
+                  {evaluation.rescreenRecommended ? ". Re-screen recommended." : "."}
+                </p>
+                {evaluation.screenQualityNote && (
+                  <p className="mt-1 text-[11px] text-slate-300 leading-relaxed">
+                    {evaluation.screenQualityNote}
+                  </p>
+                )}
+                <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
+                  Read the verdict as provisional. Fragmented answers, repeated questions and
+                  "hello, can you hear me?" around the drops are the platform, not the candidate.
+                </p>
+              </div>
+            </section>
+          )}
+
           {/* Summary */}
           <section className="p-5 rounded-2xl bg-slate-900/50 border border-slate-800">
             <h2 className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">

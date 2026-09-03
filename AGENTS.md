@@ -68,6 +68,19 @@ server, build, restart.
    rating only. A tab switch says nothing about whether someone understands
    connection pooling.
 
+7. **A broken call is never the candidate's fault.** The relay counts voice
+   stream drops; the grader is told, must not read "hello? can you hear me" as
+   disengagement, and reports `screenQuality` (`clean` / `degraded` /
+   `compromised`) plus `rescreenRecommended`. The scorecard shows this above the
+   verdict. A real candidate was graded "Do not advance 22" on a call that
+   dropped four times; with this in place the same transcript grades "Needs
+   discussion 38, re-screen recommended".
+
+8. **Hinglish is a first-class answer.** The interviewer accepts English, Hindi
+   or a mix and never comments on it; the grader scores content, not polish,
+   and is told the transcript is machine-transcribed speech. This matters for
+   who Lokal hires.
+
 ## Architecture
 
 ### The four inputs
@@ -105,7 +118,7 @@ candidate path.
 | `backend/src/novaSonic.ts` | WS <-> Bedrock bidirectional stream relay |
 | `backend/src/grading.ts` | Auto-grades when a stream ends |
 | `backend/src/evaluate.ts` | Scoring prompt + generic counterfactual |
-| `backend/src/sessionStore.ts` | In-memory Map, mirrored to `.sessions.json` |
+| `backend/src/sessionStore.ts` | In-memory Map, mirrored (debounced, async) to `.sessions.json`; evidence blobs in `.evidence/` |
 | `backend/src/contextPack/` | fetch -> redact -> sanitize -> validate pipeline |
 | `frontend/hooks/useNovaSonicInterview.ts` | Audio capture/playback, WS client |
 | `frontend/public/worklets/` | Mic capture (16kHz) and playback (24kHz) |
@@ -155,15 +168,30 @@ nobody reviewed — refusing is the honest outcome.
 - **Control payloads arrive through the text channel** (e.g. `{"interrupted":true}`).
   Filter them or they land in the transcript.
 - **Two-layer reconnect.** The relay retries the *Bedrock* stream itself on
-  `RECOVERABLE` errors (`MAX_STREAM_ATTEMPTS`, resume-from-progress via
-  `buildResumeNote`), sending `{type:"reconnecting"}` while the browser socket
-  stays open. The client separately reconnects the *browser↔relay* WebSocket
+  `RECOVERABLE` errors (`MAX_STREAM_ATTEMPTS` *consecutive* failures — the
+  counter resets once the new stream carries a real candidate turn, so a flaky
+  call is not killed on its Nth drop), sending `{type:"reconnecting"}` while
+  the browser socket stays open. Every drop is counted on the session
+  (`streamDrops`) and reaches the grader and the scorecard. The client separately reconnects the *browser↔relay* WebSocket
   (`scheduleReconnect`, `MAX_WS_RECONNECTS`) when that socket drops or fails to
   open — backend restart, network blip, or a non-recoverable relay error after its
   retries. A reconnecting client re-attaches to the same in-progress session and
   the relay resumes without re-greeting (the session already has transcripts).
   A user-initiated end and hard errors (permission, creds, no-session) never
   reconnect — those set `intentionalCloseRef` / `noReconnectRef`.
+- **The resume note shows the model the transcript tail, not a count.** An
+  earlier version counted candidate lines as "questions answered", but the ASR
+  emits several lines per utterance ("two", "hello", "yeah"), so after one drop
+  the interviewer was told both questions were done and skipped to a scenario
+  she had never asked. It also *replaces* the `HOW TO OPEN` section
+  (`renderInterviewerPrompt(..., { resumeNote })`) — appending it after left
+  the opening instructions in force and she re-greeted the candidate after
+  every drop.
+- **The opening line uses a `{{name}}` token.** The generator once baked a
+  name off the resume ("Sai Kumar") that did not match what the candidate
+  signed up as ("Venkata Sai Reddy"), and the interviewer used the wrong name
+  for the whole call. `personaliseOpening` substitutes the admin-entered name;
+  legacy banks with a baked-in greeting name get it swapped too.
 
 ### The live prompt
 
@@ -180,8 +208,16 @@ withholding them costs nothing.
   visibly janks the UI. Batch to ~32ms chunks and throttle meters to ~20fps.
 - **Playback needs a jitter buffer.** Sonic delivers in bursts (p50 1ms inside a
   burst, p99 699ms between them). Playing on the first chunk drains it in ~40ms
-  and then outputs silence — heard as speech chopping mid-word. `PRIME_SAMPLES`
-  in `playback-processor.js` holds the cushion.
+  and then outputs silence — heard as speech chopping mid-word. `PRIME_SECONDS`
+  in `playback-processor.js` holds the cushion, and it is **adaptive**: every
+  underrun grows the prime for the next turn by half, up to `MAX_PRIME_SECONDS`,
+  so a bad path trades latency for continuity only after continuity was
+  actually lost. `__round0Audio.underruns` climbing during a call means the
+  delivery path (relay event loop, main thread, network) is the problem.
+- **Bluetooth headsets sound bad by design.** When the mic is open, AirPods and
+  most BT headsets drop to the hands-free profile (8/16kHz codec) — the
+  interviewer sounds tinny and crackly regardless of anything in this code.
+  Test with wired headphones or the laptop's own mic and speakers.
 - **A barge-in flush discards buffered speech**, so a spurious one cuts the
   interviewer off regardless of buffering. Echo from speakers is the usual cause
   of constant mid-sentence interruptions. Two guards: while she speaks the mic is
@@ -227,8 +263,18 @@ withholding them costs nothing.
 
 ### Misc
 
+- **Never do synchronous work on the relay's event loop.** `persist()` used to
+  `JSON.stringify` + `writeFileSync` the whole store on every transcript line,
+  and the store carried every proctoring clip inline as base64 (~2.7MB each).
+  Two sessions in, that was an 8MB blocking write (~25ms, growing with every
+  interview of the day) several times a second while Sonic audio was being
+  relayed. Writes are now debounced and async, and evidence blobs live in
+  `backend/.evidence/<sessionId>.json` (gitignored), written once on
+  completion. Keep it that way: anything CPU-heavy (PDF parsing, big
+  serialisation) either stays off the hot path or goes in a worker.
 - `pdf-parse` v2 exports a `PDFParse` **class**, not a function. v1 examples
-  from the internet will not work.
+  from the internet will not work. It is also CPU-heavy on the main thread —
+  an admin uploading a PDF while a candidate is live will stall their audio.
 - The Confluence/Slack allowlist is hardcoded in `contextPack/sources.ts`. For a
   different org: replace `company-profile.md`, edit that allowlist, set the env
   tokens. With no tokens at all it still works — profile plus JD-derived scenarios.
