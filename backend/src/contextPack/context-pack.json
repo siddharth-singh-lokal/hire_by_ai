@@ -1,0 +1,408 @@
+{
+  "version": "1",
+  "generatedAt": "2026-09-03T11:28:31.549Z",
+  "stackProfile": {
+    "languages": [
+      "Python"
+    ],
+    "datastores": [
+      "PostgreSQL",
+      "Redis"
+    ],
+    "infrastructure": [
+      "Kubernetes",
+      "Gunicorn application server with gthread worker class",
+      "Small-tier managed database instances"
+    ],
+    "observability": [
+      "Application performance monitoring for request latency",
+      "Database CPU utilization metrics",
+      "5xx error rate tracking"
+    ],
+    "operatingConstraints": [
+      "Cost-sensitive infrastructure sizing - small database instances with limited vCPU",
+      "Small pod counts requiring careful connection pool math",
+      "Single database instance serving multiple logical aliases without read replicas",
+      "Connection budget constrained by database instance size, not application concurrency needs",
+      "Cache expiry patterns that can create synchronized thundering herd scenarios",
+      "No distributed cache stampede protection mechanisms",
+      "Thread-per-request concurrency model with fixed thread counts per worker",
+      "Deploy-time cache invalidation through versioned cache keys"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "connection-pool-sizing-constraint",
+      "title": "Connection pool sizing on a small database instance",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "Gunicorn"
+      ],
+      "constraints": [
+        "cost-constrained instance sizing",
+        "multi-process architecture"
+      ],
+      "prompt": "A Django application runs on a 2-vCPU PostgreSQL instance. The deployment has 2 pods, each running 1 Gunicorn worker with 2 threads (gthread worker class). The team is implementing connection pooling using Django 5.1's built-in psycopg3 pool. They have two database aliases configured — 'default' for writes and 'slave' for reads — but both aliases point to the same physical database instance (there is no read replica). How should they size the connection pool's max_size parameter, and what is the total number of open connections this configuration will create?",
+      "probes": [
+        "What happens to the total connection count if they add a third pod without changing pool settings?",
+        "Why might setting max_size to 10 be wasteful in this configuration?",
+        "The HikariCP formula suggests (cores × 2) + spindles = 5 connections for optimal throughput on this instance. How does that constraint interact with the pool sizing decision?",
+        "What would break if they set min_size to 1 but max_size to 10?"
+      ],
+      "weakAnswer": [
+        "Just set it to a high number like 20 to be safe",
+        "Use the default pool size from the documentation",
+        "Calculate based only on the number of pods without considering threads or aliases",
+        "Ignore that both aliases point to the same instance"
+      ],
+      "strongAnswer": [
+        "Sets max_size to 2 (one connection per thread) because each worker can only handle 2 concurrent requests",
+        "Calculates total connections as: 2 pods × 1 worker × 2 aliases × 2 connections = 8 open connections",
+        "Recognizes that both aliases share the same instance, so 8 connections compete for the same 2-vCPU budget",
+        "Notes that the HikariCP formula suggests ~5 concurrent connections for optimal throughput, and this configuration stays within that (max 4 threads across both pods)",
+        "Understands that Django creates one pool per alias per worker process, not shared across processes",
+        "Identifies that a larger pool would be wasteful since threads are the bottleneck, not pool size"
+      ],
+      "competencies": [
+        "databases",
+        "capacity-planning",
+        "concurrency"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "idle-connection-timeout-race",
+      "title": "Preventing 'server closed connection unexpectedly' errors",
+      "stack": [
+        "PostgreSQL",
+        "connection pooling"
+      ],
+      "constraints": [
+        "distributed timeout configuration"
+      ],
+      "prompt": "A connection pool is configured with a max_idle parameter that closes connections unused for a certain duration. The PostgreSQL server has an idle_session_timeout setting, and there may be load balancers or NAT gateways with their own idle timeouts in the network path. Occasionally, requests fail with 'OperationalError: server closed the connection unexpectedly' even though the database is healthy. What is the likely cause, and what is the rule for configuring these timeout values?",
+      "probes": [
+        "Why does the pool not detect that the connection is dead before handing it to a request?",
+        "What happens if the pool's max_idle is set higher than the server's idle_session_timeout?",
+        "Would setting the pool's max_idle to a very low value (like 10 seconds) solve this problem? What would be the tradeoff?",
+        "How would you diagnose which component in the stack is closing connections first?"
+      ],
+      "weakAnswer": [
+        "Just increase all timeout values to very large numbers",
+        "The database is flaky and needs to be restarted",
+        "Add retry logic to handle these errors",
+        "This is a network problem, not a configuration issue"
+      ],
+      "strongAnswer": [
+        "Identifies that the server is closing idle connections before the pool does, leaving stale connections in the pool",
+        "States the rule: the pool's max_idle must be lower than every server-side idle timeout (database, proxy, load balancer, NAT)",
+        "Explains that the pool cannot detect a server-side close until it tries to use the connection",
+        "Recognizes this is a race condition between distributed timeout configurations",
+        "Notes that the pool must always be the side that proactively closes idle connections",
+        "Understands that setting max_idle too low would work but would waste the benefit of pooling by constantly recreating connections"
+      ],
+      "competencies": [
+        "databases",
+        "distributed-systems",
+        "debugging"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "pool-timeout-vs-request-timeout",
+      "title": "Layered timeout configuration in a request path",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "Gunicorn"
+      ],
+      "constraints": [
+        "timeout hierarchy"
+      ],
+      "prompt": "A connection pool has a timeout parameter that controls how long a request waits for a free connection when the pool is exhausted. The application server (Gunicorn) has a request timeout that kills workers if a request takes too long. The pool timeout is currently set to 10 seconds, and the Gunicorn timeout is 30 seconds. Why might this specific relationship between the two timeouts be intentional, and what would happen if the pool timeout were set to 35 seconds instead?",
+      "probes": [
+        "What is the failure mode when a pool is exhausted and the timeout is reached?",
+        "What is the failure mode when Gunicorn's timeout is reached first?",
+        "Why is a 'clean error' from the pool preferable to a killed worker?",
+        "How would you tune these timeouts if you were seeing frequent pool exhaustion?"
+      ],
+      "weakAnswer": [
+        "The timeouts should be the same value",
+        "Pool timeout should always be higher than request timeout",
+        "These numbers are arbitrary and don't matter much",
+        "Just increase both timeouts to avoid errors"
+      ],
+      "strongAnswer": [
+        "Recognizes that pool timeout must be well below request timeout to fail fast with a clean exception",
+        "Explains that if pool timeout exceeds request timeout, Gunicorn kills the worker mid-wait, which is a messy failure",
+        "Identifies that a pool timeout error is observable and actionable (pool is undersized), while a killed worker is harder to diagnose",
+        "Understands this is about failure mode hierarchy: prefer explicit, recoverable errors over implicit, destructive ones",
+        "Notes that if pool exhaustion is frequent, the solution is to increase concurrency and pool size together, not just raise timeouts"
+      ],
+      "competencies": [
+        "reliability",
+        "observability",
+        "system-design"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "connection-pool-per-process-scaling",
+      "title": "Connection pool scaling with process-based concurrency",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "Gunicorn",
+        "Kubernetes"
+      ],
+      "constraints": [
+        "process isolation",
+        "database capacity"
+      ],
+      "prompt": "A Django application uses connection pooling with Django 5.1's built-in pool. The pool is configured per database alias, and Django creates one pool per alias per worker process (pools are not shared across processes). The current deployment has 2 pods, each running 1 Gunicorn worker, with a pool size of 2 per alias and 2 pooled aliases. The database instance is sized for approximately 5 concurrent connections doing useful work. The team wants to scale out by adding more pods. What calculation should they perform before scaling, and what constraint might they hit?",
+      "probes": [
+        "How many connections would 5 pods create with the current configuration?",
+        "What happens to database throughput when the number of concurrent connections exceeds the core count?",
+        "If they increase the number of Gunicorn workers per pod instead of adding pods, how does that change the connection count?",
+        "What would you monitor to detect that the database is overloaded with connections?"
+      ],
+      "weakAnswer": [
+        "Just add more pods, the pool will handle it automatically",
+        "Connection pooling means you don't have to worry about connection limits",
+        "The database can handle as many connections as you throw at it",
+        "Scale pods and database independently"
+      ],
+      "strongAnswer": [
+        "Calculates connections per pod: 1 worker × 2 aliases × 2 pool size = 4 connections per pod",
+        "Recognizes that total connections scale linearly with pod count (N pods × 4 connections)",
+        "Identifies that the database is sized for ~5 concurrent connections, so adding pods without resizing the database will cause contention",
+        "Understands that on a 2-vCPU instance, excess connections don't add throughput — they just queue inside PostgreSQL",
+        "Notes that the pool size is set equal to thread count, so increasing workers per pod would multiply connection count without adding concurrency",
+        "Suggests either resizing the database before scaling pods, or keeping pod count low and scaling vertically instead"
+      ],
+      "competencies": [
+        "capacity-planning",
+        "databases",
+        "scaling"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "connection-pool-rollback-strategy",
+      "title": "Designing a safe rollback path for infrastructure changes",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "Kubernetes"
+      ],
+      "constraints": [
+        "zero-downtime deployment"
+      ],
+      "prompt": "A team is adding connection pooling to a Django application that previously opened a new database connection for every request. They want to ensure they can roll back quickly if pooling causes problems in production. The pooling feature is controlled by a single environment variable (DB_POOL_ENABLED) that can be set to True or False. What makes this a good rollback design, and what would you want to verify before deploying this change?",
+      "probes": [
+        "Why is an environment variable toggle better than a code change for this feature?",
+        "What should the team test in a non-production environment before enabling pooling in production?",
+        "What metrics would indicate that pooling is causing problems and a rollback is needed?",
+        "Why might the team want to use the same pool settings in dev, staging, and production?"
+      ],
+      "weakAnswer": [
+        "Just deploy it and see what happens",
+        "Rollback means reverting the code commit",
+        "Connection pooling is always better, so rollback isn't necessary",
+        "Use different pool sizes in each environment to be safe"
+      ],
+      "strongAnswer": [
+        "Recognizes that an env var toggle allows rollback without code changes or redeployment — just restart pods with the var flipped",
+        "Identifies that this is a runtime configuration change, not a code change, which is faster and safer to revert",
+        "Suggests monitoring connection count, API latency, and pool timeout errors as indicators of problems",
+        "Notes that using the same settings across environments ensures pool behavior (timeouts, exhaustion) can be reproduced locally",
+        "Understands that different pool sizes per environment would hide problems until production",
+        "Recommends load testing with pooling enabled in staging to verify the pool size is adequate"
+      ],
+      "competencies": [
+        "reliability",
+        "deployment",
+        "observability"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "cache-stampede-fixed-ttl",
+      "title": "Daily cache expiry causing database saturation",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "Redis",
+        "Celery"
+      ],
+      "constraints": [
+        "fixed 24-hour TTL",
+        "no cache stampede protection",
+        "expensive multi-table joins"
+      ],
+      "prompt": "A service caches the result of an expensive database query (joining multiple tables and prefetching several relations) in Redis with a 24-hour TTL. The cache is only refreshed when an admin updates the underlying data or when the TTL expires. After a deployment that changes the cache key, the team observes severe database CPU spikes occurring at the same time every day, causing timeouts across unrelated APIs. What's happening and how would you fix it?",
+      "probes": [
+        "Why does changing the cache key on deploy trigger an immediate spike?",
+        "Why does the spike recur at exactly the same time each day?",
+        "What happens when the cache expires and multiple workers simultaneously find it empty?",
+        "How would you prevent all workers from hitting the database at once?",
+        "What are the tradeoffs between different stampede protection approaches (locks, probabilistic early expiration, background refresh)?",
+        "How would you make the expiry time less predictable to avoid synchronized load?"
+      ],
+      "weakAnswer": [
+        "Just increase the cache TTL to reduce how often it expires",
+        "Add more database capacity to handle the spikes",
+        "Only suggests adding an index without addressing the stampede pattern",
+        "Doesn't recognize that all workers racing to fill an empty cache is the core problem"
+      ],
+      "strongAnswer": [
+        "Identifies the cache stampede: when TTL expires, all workers simultaneously find cache empty and independently execute the expensive query",
+        "Recognizes that fixed 24-hour TTL pins expiry to the same wall-clock time daily, creating predictable load spikes",
+        "Explains why deploy triggered immediate spike: new cache key invalidated warm cache, all pods started cold",
+        "Proposes stampede protection: single-flight pattern, mutex/lock on cache key, or probabilistic early refresh",
+        "Suggests background refresh before expiry to keep cache perpetually warm",
+        "Considers adding jitter to TTL to distribute expiry across time",
+        "Notes that cache-aside pattern without coordination is vulnerable to thundering herd"
+      ],
+      "competencies": [
+        "caching",
+        "databases",
+        "reliability",
+        "performance"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "stale-data-query-bloat",
+      "title": "Soft-deleted records bloating cached queries",
+      "stack": [
+        "PostgreSQL",
+        "Django"
+      ],
+      "constraints": [
+        "soft delete pattern",
+        "cached query results",
+        "no cleanup process"
+      ],
+      "prompt": "A query fetches all 'active' records by filtering on an `is_active=True` flag. Many records also have an `ended_at` timestamp that indicates when they should no longer be considered active, but the query doesn't check this field. Over time, the query becomes slower and the cached result grows larger, even though the number of truly active records hasn't changed. What's the issue and how would you address it?",
+      "probes": [
+        "Why would records have `is_active=True` but a past `ended_at` timestamp?",
+        "What are the tradeoffs between filtering at query time versus cleaning up stale flags?",
+        "How would you design a cleanup process that doesn't cause downtime or lock contention?",
+        "Should the cleanup be synchronous (on read/write) or asynchronous (background job)?",
+        "How would you handle the transition period where stale records still exist?"
+      ],
+      "weakAnswer": [
+        "Just add the `ended_at` filter without considering why the flags weren't updated",
+        "Suggests a one-time manual cleanup without ongoing maintenance",
+        "Doesn't recognize this as a data quality issue that will recur without process changes"
+      ],
+      "strongAnswer": [
+        "Identifies that soft-delete pattern (is_active flag) wasn't being maintained when time-based expiry occurred",
+        "Proposes both immediate fix (add ended_at filter to query) and long-term fix (background job to update flags)",
+        "Considers using a database view or generated column to compute 'truly active' status",
+        "Suggests scheduled task to periodically reconcile is_active with ended_at",
+        "Notes that filtering at query time is safer during transition but cleanup improves long-term data quality",
+        "Considers indexing strategy: compound index on (is_active, ended_at) if both filters are used"
+      ],
+      "competencies": [
+        "databases",
+        "data-modeling",
+        "performance"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "cache-key-versioning-invalidation",
+      "title": "Cache key versioning and cold start impact",
+      "stack": [
+        "Redis",
+        "Django"
+      ],
+      "constraints": [
+        "versioned cache keys",
+        "deployment timing",
+        "no warm-up strategy"
+      ],
+      "prompt": "A service versions its cache keys (e.g., `offers:v1`, `offers:v2`) so that when the shape of cached data changes, old cached data isn't read by new code. During a deployment, the cache key changes from v1 to v2. Immediately after deploy, the service experiences a severe load spike. Why does this happen and how would you mitigate it in future deployments?",
+      "probes": [
+        "What happens to the old v1 cache when the code starts looking for v2?",
+        "Why does every pod/worker hit the database simultaneously after deploy?",
+        "How would you warm the new cache key before switching traffic to new code?",
+        "What are the tradeoffs between versioned keys versus cache invalidation on deploy?",
+        "Could you deploy in a way that pre-populates the new cache key before cutover?"
+      ],
+      "weakAnswer": [
+        "Just says 'warm the cache' without explaining how or when",
+        "Suggests rolling back the deploy without addressing the underlying pattern",
+        "Doesn't recognize that versioned keys intentionally invalidate old cache"
+      ],
+      "strongAnswer": [
+        "Explains that changing cache key makes all existing cached data unreachable, forcing cold start",
+        "Recognizes that all pods starting simultaneously with cold cache creates thundering herd",
+        "Proposes pre-warming: run a script to populate new cache key before deploy completes",
+        "Suggests phased rollout: deploy code that reads v2 but still writes to v1, warm v2, then switch reads",
+        "Considers blue-green deployment where new version warms its cache before traffic switches",
+        "Notes that versioned keys are correct for schema changes but require deployment coordination",
+        "Might suggest feature flag to control cache key version independently of code deploy"
+      ],
+      "competencies": [
+        "caching",
+        "deployment",
+        "reliability"
+      ],
+      "difficulty": 3
+    },
+    {
+      "id": "prefetch-query-n-plus-one",
+      "title": "ORM prefetch causing simultaneous expensive queries",
+      "stack": [
+        "PostgreSQL",
+        "Django"
+      ],
+      "constraints": [
+        "ORM prefetch behavior",
+        "multiple related tables",
+        "concurrent query execution"
+      ],
+      "prompt": "A Django view fetches a set of records and uses `prefetch_related()` to load four different relations (e.g., languages, packages, attachments, cohorts). When the cache is cold, the database experiences extreme CPU saturation. Investigation shows that four separate `SELECT ... WHERE id IN (...)` queries are hitting the database at nearly the same moment, each with hundreds of IDs in the IN clause. Why is this particularly expensive, and how would you optimize it?",
+      "probes": [
+        "Why does Django issue separate queries for each prefetch_related relation?",
+        "What makes an IN clause with hundreds of values expensive?",
+        "How does the database execute a query with a large IN clause?",
+        "Would breaking this into smaller batches help or hurt?",
+        "What's the difference between prefetch_related and select_related, and when would you use each?",
+        "Could you restructure the data model to reduce the number of joins needed?"
+      ],
+      "weakAnswer": [
+        "Just says 'add an index' without considering query structure",
+        "Suggests caching without addressing why the underlying query is expensive",
+        "Doesn't understand how ORM prefetching works or why it generates multiple queries"
+      ],
+      "strongAnswer": [
+        "Explains that prefetch_related issues separate queries for each relation to avoid cartesian product from joins",
+        "Recognizes that large IN clauses can be expensive: query planning overhead, index lookups for each value",
+        "Notes that four simultaneous expensive queries compete for database resources",
+        "Suggests batching: fetch main records in chunks, prefetch relations for each chunk",
+        "Considers denormalization: if these relations are read-heavy, could they be embedded or pre-joined?",
+        "Proposes pagination: if not all records are needed at once, fetch in pages to reduce query size",
+        "Might suggest database-level optimization: covering indexes, query plan analysis",
+        "Considers whether all four relations are actually needed, or if some could be lazy-loaded"
+      ],
+      "competencies": [
+        "databases",
+        "performance",
+        "ORMs"
+      ],
+      "difficulty": 2
+    }
+  ],
+  "sourceSummary": [
+    {
+      "source": "confluence",
+      "documentCount": 2
+    }
+  ],
+  "approved": true
+}

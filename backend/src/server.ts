@@ -3,10 +3,18 @@ import { createServer } from "http";
 import cors from "cors";
 import dotenv from "dotenv";
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import { CANDIDATE_RESUME, generateInterviewerSystemPrompt } from "./resumeData";
+import { CANDIDATE_RESUME } from "./resumeData";
 import { ScorecardEvaluation } from "./scorecardTypes";
 import { bedrockClient, EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION, extractJson } from "./bedrock";
 import { attachNovaSonicRelay } from "./novaSonic";
+import {
+  generateQuestionBank,
+  loadContextPack,
+  InterviewDuration,
+  QuestionBank,
+} from "./questionBank";
+import { createSession, getSession } from "./sessionStore";
+import { evaluateInterview, evaluateGeneric } from "./evaluate";
 
 dotenv.config();
 
@@ -46,91 +54,147 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
-// 1. Session Broker: Mints ephemeral token from OpenAI Realtime API
-app.post("/api/session", async (req: Request, res: Response) => {
+// 1a. PDF text extraction, so real JD and resume PDFs can be dropped straight in
+// rather than copy-pasted. Accepts a base64 payload from the browser.
+app.post("/api/extract-text", async (req: Request, res: Response) => {
   try {
-    let apiKey = process.env.OPENAI_API_KEY?.trim();
-
-    if (!apiKey) {
-      const headerKey = req.headers["x-openai-api-key"];
-      if (typeof headerKey === "string" && headerKey.trim()) {
-        apiKey = headerKey.trim();
-      }
+    const { fileBase64 } = req.body || {};
+    if (!fileBase64) {
+      return res.status(400).json({ error: "MISSING_FILE", message: "No file supplied." });
     }
 
-    if (!apiKey && req.body?.apiKey) {
-      apiKey = String(req.body.apiKey).trim();
-    }
-
-    if (!apiKey) {
-      return res.status(401).json({
-        error: "OPENAI_API_KEY_MISSING",
-        message:
-          "OpenAI API key not found. Please configure OPENAI_API_KEY in backend .env or provide it via client request headers/modal.",
-      });
-    }
-
-    const instructions = generateInterviewerSystemPrompt();
-
-    const response = await fetch("https://api.openai.com/v1/realtime/sessions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-realtime-preview-2024-12-17",
-        voice: "ash",
-        modalities: ["audio", "text"],
-        instructions: instructions,
-        input_audio_transcription: {
-          model: "whisper-1",
-        },
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500,
-          create_response: true,
-        },
-        temperature: 0.7,
-        max_response_output_tokens: 800,
-      }),
+    // Required lazily: pdf-parse pulls in a large PDF.js bundle, and the server
+    // should not pay that cost on every boot just to serve health checks.
+    const { PDFParse } = require("pdf-parse");
+    const parser = new PDFParse({
+      data: new Uint8Array(Buffer.from(fileBase64.split(",").pop(), "base64")),
     });
+    const result = await parser.getText();
+    await parser.destroy();
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("[Session Broker Error] OpenAI responded with:", response.status, errorText);
-      return res.status(response.status).json({
-        error: "OPENAI_SESSION_FAILED",
-        status: response.status,
-        message: `Failed to create OpenAI Realtime session: ${response.statusText}`,
-        details: errorText,
-      });
-    }
-
-    const sessionData = (await response.json()) as any;
-
-    return res.json({
-      success: true,
-      sessionId: sessionData.id,
-      model: sessionData.model,
-      voice: sessionData.voice,
-      client_secret: sessionData.client_secret,
-    });
+    return res.json({ success: true, text: result.text });
   } catch (error: any) {
-    console.error("[Session Broker Exception]:", error);
+    console.error("[ExtractText] Failed:", error?.message);
     return res.status(500).json({
-      error: "INTERNAL_SERVER_ERROR",
-      message: error?.message || "An unexpected error occurred while negotiating session token.",
+      error: "EXTRACT_FAILED",
+      message: "Could not read that PDF. Paste the text instead.",
     });
   }
 });
 
-// 2. Evaluation Engine: Produces candidate scorecard using gpt-4o-mini
+// 1b. Interview Preparation: JD + resume -> question bank -> prepared session.
+// This is the step that makes the interview role-aware and org-grounded.
+app.post("/api/prepare", async (req: Request, res: Response) => {
+  try {
+    const { jdText, resumeText, candidateName, durationMinutes } = req.body || {};
+
+    if (!jdText?.trim() || !resumeText?.trim()) {
+      return res.status(400).json({
+        error: "MISSING_INPUT",
+        message: "Both a job description and a resume are required to prepare an interview.",
+      });
+    }
+
+    const duration = ([15, 30, 45] as const).includes(durationMinutes)
+      ? (durationMinutes as InterviewDuration)
+      : 30;
+
+    const started = Date.now();
+    const bank = await generateQuestionBank({ jdText, resumeText, duration });
+    const session = createSession(candidateName?.trim() || "the candidate", bank);
+
+    console.log(
+      `[Prepare] ${session.id} — ${bank.role} (${bank.seniority}), ` +
+        `${bank.questions.length} questions, ${duration}min, ${Date.now() - started}ms`
+    );
+
+    // The bank itself is returned so the recruiter can review what will be asked
+    // before the candidate joins — the auditability half of the design. The
+    // candidate's client only ever receives the sessionId.
+    return res.json({
+      success: true,
+      sessionId: session.id,
+      candidateName: session.candidateName,
+      bank,
+      grounded: loadContextPack() !== null,
+    });
+  } catch (error: any) {
+    console.error("[Prepare] Failed:", error);
+    return res.status(500).json({
+      error: "PREPARE_FAILED",
+      message: error?.message || "Could not prepare the interview.",
+    });
+  }
+});
+
+// 1c. Context pack inspection — powers the "what will be asked, and is it safe"
+// panel. Returns scenarios only; provenance stays server-side.
+app.get("/api/context-pack", (_req: Request, res: Response) => {
+  const pack = loadContextPack();
+  if (!pack) {
+    return res.json({ approved: false, scenarios: [], stackProfile: null });
+  }
+  return res.json({
+    approved: pack.approved,
+    generatedAt: pack.generatedAt,
+    stackProfile: pack.stackProfile,
+    sourceSummary: pack.sourceSummary,
+    scenarios: pack.scenarios.map((s) => ({
+      id: s.id,
+      title: s.title,
+      stack: s.stack,
+      constraints: s.constraints,
+      difficulty: s.difficulty,
+      competencies: s.competencies,
+    })),
+  });
+});
+
+// 2. Evaluation Engine: Produces candidate scorecard
+/**
+ * Grades against the rubric the session's question bank generated.
+ *
+ * Falls through to the legacy path below when no sessionId is supplied, so old
+ * recordings and the no-prep demo route still produce a scorecard.
+ */
 app.post("/api/evaluate", async (req: Request, res: Response) => {
   try {
-    const { transcripts = [], durationSeconds = 0, redFlags = [] } = req.body;
+    const { transcripts = [], durationSeconds = 0, redFlags = [], sessionId } = req.body;
+
+    const prepared = sessionId ? getSession(sessionId) : undefined;
+
+    if (prepared && transcripts.length > 0) {
+      const evaluation = await evaluateInterview({
+        bank: prepared.bank,
+        candidateName: prepared.candidateName,
+        transcripts,
+        durationSeconds,
+        redFlags,
+        orgGrounded: loadContextPack() !== null,
+      });
+
+      // The counterfactual: same transcript, generic rubric, no org context.
+      // Runs alongside so the two verdicts can be shown side by side.
+      let generic = null;
+      try {
+        generic = await evaluateGeneric({
+          candidateName: prepared.candidateName,
+          role: prepared.bank.role,
+          transcripts,
+        });
+      } catch (err: any) {
+        console.error("[Evaluate] Generic comparison failed:", err?.message);
+      }
+
+      console.log(
+        `[Evaluate] ${prepared.id} — grounded: ${evaluation.verdict} ${evaluation.overallScore}` +
+          (generic ? ` | generic: ${generic.verdict} ${generic.overallScore}` : "")
+      );
+
+      return res.json({ success: true, evaluation, genericComparison: generic });
+    }
+
+    // --- legacy path: no prepared session ---
 
     const formattedTranscript = transcripts
       .map(

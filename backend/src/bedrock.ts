@@ -12,8 +12,27 @@ import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
  */
 export const AWS_REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-west-2";
 
+/**
+ * Model per task, chosen by what this sandbox actually grants (opus-5, sonnet-5,
+ * gpt-5.6 and grok all return AccessDenied here).
+ *
+ *  - Bank generation and evaluation are quality-critical and latency-tolerant:
+ *    they run once, before or after the call, never inside the voice loop.
+ *    Opus 4.6 is the strongest reasoning model available.
+ *  - Sanitization runs once per source document, so it is the bulk workload.
+ *    Sonnet 4.6 is fast, cheap and more than good enough for extraction.
+ *  - The leak validator stays on Sonnet deliberately: it is an independent
+ *    check, and using a different model from the one that wrote the text means
+ *    a blind spot in one is less likely to be shared by the other.
+ */
 export const EVALUATION_MODEL_ID =
-  process.env.BEDROCK_EVALUATION_MODEL_ID || "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+  process.env.BEDROCK_EVALUATION_MODEL_ID || "us.anthropic.claude-opus-4-6-v1";
+
+export const GENERATION_MODEL_ID =
+  process.env.BEDROCK_GENERATION_MODEL_ID || "us.anthropic.claude-opus-4-6-v1";
+
+export const SANITIZER_MODEL_ID =
+  process.env.BEDROCK_SANITIZER_MODEL_ID || "us.anthropic.claude-sonnet-4-6";
 
 export const SONIC_MODEL_ID = process.env.BEDROCK_SONIC_MODEL_ID || "amazon.nova-2-sonic-v1:0";
 

@@ -30,3 +30,6 @@ yarn-error.log*
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+
+# Raw internal docs pulled for Context Pack building — never commit
+backend/src/contextPack/raw/

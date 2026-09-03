@@ -38,3 +38,59 @@ export interface ScorecardEvaluation {
   evaluationMode: "realtime_llm" | "offline_simulation";
   modelUsed?: string;
 }
+
+/**
+ * Additions for the org-grounded flow.
+ *
+ * The original scorecard had four fixed ratings. Those are kept so older
+ * sessions still render, but a bank-driven interview grades against the rubric
+ * the bank generated — which differs per role — plus two outputs aimed squarely
+ * at saving the hiring manager time.
+ */
+
+/** Score against one generated rubric axis, with the evidence behind it. */
+export interface AxisScore {
+  axis: string;
+  score: number; // 1 - 5, calibrated to the JD's seniority
+  justification: string;
+  /** Verbatim candidate quotes supporting the score. */
+  evidence: string[];
+}
+
+/** Timestamped moment worth a recruiter's attention. */
+export interface EvidenceMoment {
+  timeInSeconds: number;
+  speaker: "candidate" | "interviewer";
+  quote: string;
+  significance: string;
+  impact: "positive" | "negative" | "neutral";
+}
+
+/** The hand-off: what the human interviewer should do with their hour. */
+export interface R1Briefing {
+  /** Covered convincingly — re-asking wastes the engineer's time. */
+  skip: { topic: string; reason: string }[];
+  /** Weak, dodged, or unverified — where R1 should spend its time. */
+  probe: { topic: string; reason: string; suggestedQuestion: string }[];
+  /** A ready-made opening line so R1 starts warm, not cold. */
+  suggestedOpener: string;
+}
+
+/** JD requirement vs. what the interview actually established. */
+export interface GapMatrixRow {
+  requirement: string;
+  status: "evidenced" | "partial" | "unevidenced" | "contradicted";
+  finding: string;
+}
+
+export interface GroundedScorecard extends ScorecardEvaluation {
+  candidateName: string;
+  role: string;
+  seniority: string;
+  axisScores: AxisScore[];
+  evidenceMoments: EvidenceMoment[];
+  r1Briefing: R1Briefing;
+  gapMatrix: GapMatrixRow[];
+  /** True when questions were grounded in the org Context Pack. */
+  orgGrounded: boolean;
+}

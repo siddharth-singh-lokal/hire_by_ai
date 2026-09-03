@@ -1,126 +1,143 @@
-# Round-0 AI Technical Interview System
+# Round-0: Org-Grounded Technical Screening
 
-A prototype two-way conversational AI technical interview platform, with live proctoring and a recruiter audit trail. Runs entirely on **Amazon Bedrock** — no OpenAI key required.
+An AI screening round that interviews candidates against **your** engineering reality — not a generic bar — and hands a hiring manager evidence instead of a score.
 
-Decoupled into two applications:
-1. **`backend/`** — Express server: Nova Sonic speech-to-speech relay + Claude evaluation engine.
-2. **`frontend/`** — Next.js 14 client: interview room, MediaPipe proctoring, session recording, recruiter scorecard.
+Runs entirely on **Amazon Bedrock**. No OpenAI key required.
 
 ---
 
-## 🏗️ Architecture
+## The problem
 
-```
-+---------------------------------------------------------------------------+
-|                     FRONTEND (Next.js - Port 3030)                        |
-|                                                                           |
-|  - AudioWorklet mic capture (16kHz PCM16) + playback queue (24kHz)         |
-|  - MediaPipe FaceDetector proctoring (WASM, vendored locally)              |
-|  - MediaRecorder session capture -> in-memory blob                         |
-|  - Audio-reactive visualizer, rolling transcript, recruiter scorecard      |
-+---------------------------------------------------------------------------+
-       |                                              |
-       | WebSocket /ws/interview                      | POST /api/evaluate
-       v                                              v
-+---------------------------------------------------------------------------+
-|                      BACKEND (Express - Port 4000)                        |
-|                                                                           |
-|  Nova Sonic relay: browsers can't speak HTTP/2 bidirectional streams, so   |
-|  this bridges WebSocket <-> InvokeModelWithBidirectionalStream.            |
-+---------------------------------------------------------------------------+
-       |                                              |
-       v                                              v
-+------------------------------------+  +---------------------------------------+
-|  amazon.nova-2-sonic-v1:0          |  |  us.anthropic.claude-sonnet-4-5        |
-|  SPEECH in -> SPEECH + TEXT out    |  |  Structured JSON scorecard             |
-|  Server-side VAD, barge-in support |  |  Reads transcript + proctoring flags   |
-+------------------------------------+  +---------------------------------------+
-```
+HR owns the top of the engineering funnel but cannot assess technical depth. Candidates who were never going to clear the bar reach Round 1, where a senior engineer discovers it in the first fifteen minutes. That engineer's hour is the scarcest resource in the org, and it is being spent on discovery that should have happened upstream.
 
-**Two model-ID gotchas that will cost you an hour if you miss them:**
-- Claude requires the `us.` inference-profile prefix. Bare `anthropic.claude-*` IDs fail with *"on-demand throughput isn't supported"*.
-- Nova Sonic is the opposite — ON_DEMAND only, bare model ID, no inference profile exists.
+**Why not buy this.** AI voice interviewers with webcam proctoring are a commodity — Mercor, Micro1, HireVue, CodeSignal, HireSnap at ₹200 a session. They all screen for *generic* engineering ability, which correlates only loosely with succeeding here. Someone excellent at a well-funded SaaS company can still fail on a cost-constrained Django/Postgres stack that pivots every few weeks.
+
+**The asymmetry.** Vendors have breadth. You have depth. No vendor can read your postmortems.
 
 ---
 
-## ⚡ Quickstart
+## How it works
 
-### 1. AWS credentials
+```
+JD           ──▶  which competencies to test, the bar, culture criteria
+Resume       ──▶  which claims to verify, which projects to drill into
+Context Pack ──▶  what the scenarios testing those competencies are MADE OF
+Duration     ──▶  how many probes actually fit
+                        │
+                        ▼
+              Question bank  ──▶  live voice interview  ──▶  evidence scorecard
+```
 
-Everything resolves through the standard AWS provider chain. Either set a profile:
+The Context Pack is the **setting, never the syllabus**. Candidates are never quizzed on internal trivia — that would be unfair and would measure nothing. They are asked to reason about problems *shaped like* the ones this org actually has.
+
+### Two phases that never touch
+
+A live Slack/Confluence connection on an agent talking to an external candidate is a data-exfiltration surface with a microphone on it. So:
+
+```
+PHASE 1 — offline, re-runnable, human-approved
+  Confluence + Slack (read-only, hardcoded allowlist)
+      ├─▶ redact    deterministic rules, before any model sees the text
+      ├─▶ abstract  rewrite as standalone engineering problems
+      ├─▶ validate  regex gate + adversarial LLM review, FAILS CLOSED
+      └─▶ approve   a human reads it and says yes
+                          │
+                    context-pack.json
+                          │
+PHASE 2 — live call, ZERO retrieval
+  The voice agent receives only the approved question bank.
+  No MCP. No tools. No network path to Slack.
+  It cannot leak what it was never given.
+```
+
+---
+
+## Models
+
+| Task | Model | Why |
+|---|---|---|
+| Voice interview | `amazon.nova-2-sonic-v1:0` | Only speech-to-speech on Bedrock. Barge-in, plus text transcripts on the same stream |
+| Question bank | `us.anthropic.claude-opus-4-6-v1` | Quality-critical, runs once before the call |
+| Evaluation | `us.anthropic.claude-opus-4-6-v1` | Grading is the output that matters most |
+| Sanitize + validate | `us.anthropic.claude-sonnet-4-6` | Bulk workload; a *different* model from the writer, so blind spots aren't shared |
+
+Measured: **~1.8s** end-of-speech to first audio byte.
+
+---
+
+## Quickstart
 
 ```bash
 # backend/.env
 PORT=4000
-AWS_PROFILE=workshop
+AWS_PROFILE=workshop          # or AWS_ACCESS_KEY_ID / SECRET / SESSION_TOKEN
 AWS_REGION=us-west-2
+
+# optional — enables live Confluence/Slack fetch
+CONFLUENCE_BASE_URL=https://<site>.atlassian.net
+CONFLUENCE_EMAIL=you@company.com
+CONFLUENCE_API_TOKEN=...       # id.atlassian.com/manage-profile/security/api-tokens
+SLACK_BOT_TOKEN=xoxb-...       # channels:history + channels:read
 ```
-
-…or export Workshop Studio credentials directly (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`).
-
-Verify Bedrock reachability before starting:
 
 ```bash
-aws bedrock list-foundation-models --region us-west-2 \
-  --query "modelSummaries[?contains(modelId,'sonic')].[modelId,modelLifecycle.status]" --output text
+npm run dev:backend    # :4000  — API + Nova Sonic relay
+npm run dev:frontend   # :3030  — setup, interview room, scorecard
 ```
 
-### 2. Run
+Open **http://localhost:3030**, paste or upload a JD and a resume, set the candidate's name and interview length, generate the plan, review it, start.
+
+### Context Pack commands
 
 ```bash
-npm run dev:backend    # Express + Sonic relay on :4000
-npm run dev:frontend   # Next.js on :3030
+npm run pack:fetch                 # Confluence + Slack -> raw/  (gitignored)
+npm run pack:build                 # redact -> abstract -> validate
+npm run pack:build -- --approve    # only after a human reads it
+npm run verify:redaction           # regression test: plants secrets, proves they're caught
 ```
 
-Open **http://localhost:3030**, grant camera and mic, and start the interview.
+Nothing loads an unapproved pack. `raw/` holds unsanitized internal docs and must never be committed.
 
 ---
 
-## 🎙️ How the voice loop works
+## What the sanitizer removes
 
-Nova Sonic decides the candidate has finished speaking using **server-side voice activity detection**. The mic therefore streams **continuously, including silence** — muting zeroes the samples inside the worklet rather than stopping the stream. Cutting the stream entirely means Sonic never detects end-of-turn and never replies.
+Written against things actually found in real Confluence:
 
-Barge-in is supported: interrupting mid-answer makes Sonic emit an `INTERRUPTED` event, and the client flushes its playback queue so the interviewer stops mid-sentence.
-
-Measured latency, end-of-speech to first audio byte: **~1.8s**.
-
----
-
-## 🛡️ Proctoring
-
-Runs client-side via MediaPipe FaceDetector at ~3fps, throttled so it doesn't compete with the audio pipeline. WASM and the `blaze_face_short_range` model are vendored into `public/` so the demo doesn't depend on a CDN.
-
-| Flag | Trigger |
+| Category | Examples |
 |---|---|
-| `MULTIPLE_FACES_DETECTED` | More than one face in frame |
-| `CANDIDATE_ABSENT` | Zero faces for >3s (debounced) |
-| `TAB_SWITCH_DETECTED` | `visibilitychange` / window `blur` |
+| Credentials | API keys, `AWS_SECRET_ACCESS_KEY=…`, bare 40-char base64 |
+| Personal data | emails, phone numbers |
+| Network | private IPs, EC2/RDS hostnames, internal URLs |
+| Code refs | commit SHAs, Jira keys, PR numbers, repo URLs, k8s secret names, GCP projects |
+| **Incident fingerprints** | exact wall-clock times, dates, cache-key version numbers, instance SKUs |
+| **Business logic** | pricing, payouts, tax, wallet economics, tier schemes, ranking formulas |
 
-Each flag captures a JPEG frame as evidence, with an 8s per-type cooldown to prevent duplicate spam. Flags feed the scorecard's **authenticity** rating but are explicitly excluded from technical scoring.
+That last pair matters most. *"We run PostgreSQL and Redis behind Django"* is a stack — every job ad says as much. *"Users are charged an escalating rate after N minutes"* is the business. And a timestamp plus a date plus a version number is a fingerprint even with every hostname gone: anyone who was there recognises the incident.
 
-**Phone detection from the original spec is not implemented.** Object detection for handheld devices false-positives on mugs, notebooks and hands — a proctoring tool that cries wolf is worse than one that stays quiet.
-
----
-
-## ⚠️ Prototype limitations
-
-These are deliberate scope cuts, not oversights:
-
-- **No S3.** The recording and flag snapshots are object URLs in a module-level store (`lib/sessionStore.ts`). They survive client-side navigation to `/scorecard` but **not a hard refresh or a new tab**, and nothing is shareable with a real recruiter. Swapping in S3 means replacing two functions with presigned PUTs; nothing else changes.
-- **No session persistence.** Transcripts pass through `localStorage`; there is no database.
-- **Credentials are local.** Workshop Studio credentials expire when the event ends, and the AWS profile only exists on the machine that configured it. Deploying anywhere requires real IAM.
-- **Claude grades hard.** Sonnet 4.5 will reject a thin transcript that older models passed. Tune `CANDIDATE_RESUME.rubric` before demoing.
+**The regex gate cannot catch fingerprints** — they aren't a matchable token, they're a pattern across facts. That is why there is a second, adversarial reviewer, and why it fails closed if it cannot run.
 
 ---
 
-## 🌐 Endpoints
+## Output
 
-### Backend (`http://localhost:4000`)
-- `GET /health` — service status, region, and active model IDs.
-- `WS /ws/interview` — Nova Sonic speech-to-speech relay.
-- `POST /api/evaluate` — Claude scorecard from transcript + proctoring flags. Falls back to a deterministic rubric matcher if Bedrock is unreachable, so a demo never hard-fails.
+- **Rubric** — 5 fixed axes (comparable across candidates) + 1–2 generated from the JD, with bars calibrated to that JD's seniority
+- **Evidence moments** — timestamped verbatim quotes, linked to the recording
+- **JD gap matrix** — every requirement marked evidenced / partial / unevidenced / contradicted
+- **Round-1 briefing** — *skip this, probe that, open with this.* Saves engineer time at R0 **and again** at R1
+- **Counterfactual** — the same transcript scored against a generic rubric, side by side, so "is the org context doing real work?" has an answer
+- **Integrity audit** — recording, proctoring flags, snapshot timeline
 
-### Frontend (`http://localhost:3030`)
-- `/` — hardware readiness check and candidate lobby.
-- `/interview` — live interview room with proctoring overlay and flag ticker.
-- `/scorecard` — recruiter scorecard with integrity audit, recording playback, and clickable flag timeline.
+Proctoring flags feed the **authenticity** rating only. They are explicitly excluded from technical scoring — an unexplained tab switch says nothing about whether someone understands connection pooling.
+
+---
+
+## Prototype limitations
+
+Deliberate scope cuts, not oversights:
+
+- **No S3, no database.** Recordings and snapshots are in-memory blob URLs; prepared sessions live in a `Map`. Both survive navigation, neither survives a restart.
+- **Voice-only.** R0 tests reasoning, not implementation. R1 still tests code.
+- **Calibration is directional.** Validating against a handful of known engineers is evidence, not statistics.
+- **Local credentials.** The AWS profile only exists on the machine that configured it. Deploying needs real IAM.
+- **Phone detection not implemented.** Object detection for handheld devices false-positives on mugs and hands. A proctor that cries wolf is worse than one that stays quiet.

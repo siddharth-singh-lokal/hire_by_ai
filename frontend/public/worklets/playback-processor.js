@@ -2,17 +2,28 @@
  * Plays back the interviewer's voice.
  *
  * Nova Sonic streams 24kHz PCM16 in chunks that arrive faster than real time, so
- * they are queued here and drained one render quantum at a time. The queue is
+ * they are queued and drained one render quantum at a time. The queue is
  * flushable: when the candidate interrupts, Sonic sends an INTERRUPTED event and
- * we drop everything still buffered so Sarah stops mid-sentence instead of
+ * everything still buffered is dropped so Sarah stops mid-sentence rather than
  * talking over them.
+ *
+ * PERFORMANCE: at 24kHz a render quantum is 5.3ms, so posting a level on every
+ * call meant ~187 messages and ~187 React re-renders per second. Levels are now
+ * throttled to roughly 20fps, which is more than enough for a volume meter and
+ * removes the jank. Start/stop transitions are still posted immediately, since
+ * those drive the "speaking" indicator and must not lag.
  */
+
+const LEVEL_INTERVAL_QUANTA = 8; // ~43ms at 24kHz -> ~23 updates/sec
+
 class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.queue = [];
     this.offset = 0;
     this.wasPlaying = false;
+    this.quantaSinceLevel = 0;
+    this.peakSinceLevel = 0;
 
     this.port.onmessage = (e) => {
       const { type, pcm } = e.data || {};
@@ -29,8 +40,6 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     const out = outputs[0][0];
     if (!out) return true;
 
-    let peak = 0;
-
     for (let i = 0; i < out.length; i++) {
       if (!this.queue.length) {
         out[i] = 0;
@@ -42,7 +51,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       out[i] = sample;
 
       const abs = sample < 0 ? -sample : sample;
-      if (abs > peak) peak = abs;
+      if (abs > this.peakSinceLevel) this.peakSinceLevel = abs;
 
       if (this.offset >= chunk.length) {
         this.queue.shift();
@@ -50,14 +59,24 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Let the main thread drive the "speaking" indicator off actual output,
-    // which is more accurate than the stream events for UI purposes.
     const playing = this.queue.length > 0;
+
+    // Transitions post immediately — this drives the speaking indicator.
     if (playing !== this.wasPlaying) {
       this.wasPlaying = playing;
       this.port.postMessage({ type: "playing", playing });
+      if (!playing) {
+        this.quantaSinceLevel = 0;
+        this.peakSinceLevel = 0;
+      }
     }
-    if (playing) this.port.postMessage({ type: "level", peak });
+
+    // Levels are throttled.
+    if (playing && ++this.quantaSinceLevel >= LEVEL_INTERVAL_QUANTA) {
+      this.port.postMessage({ type: "level", peak: this.peakSinceLevel });
+      this.quantaSinceLevel = 0;
+      this.peakSinceLevel = 0;
+    }
 
     return true;
   }

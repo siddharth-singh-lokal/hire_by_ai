@@ -6,14 +6,19 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "ts-node src/server.ts"
+    "dev": "ts-node src/server.ts",
+    "verify:redaction": "ts-node src/contextPack/verifyRedaction.ts",
+    "pack:build": "ts-node src/contextPack/build.ts",
+    "pack:fetch": "ts-node src/contextPack/fetch.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1125.0",
+    "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "pdf-parse": "^2.4.5",
     "ws": "^8.21.3"
   },
   "devDependencies": {

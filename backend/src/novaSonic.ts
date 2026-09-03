@@ -4,6 +4,8 @@ import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { bedrockClient, SONIC_MODEL_ID } from "./bedrock";
 import { generateInterviewerSystemPrompt } from "./resumeData";
+import { getSession } from "./sessionStore";
+import { renderInterviewerPrompt } from "./questionBank";
 
 /**
  * Nova Sonic relay.
@@ -85,8 +87,24 @@ interface SonicSession {
 export function attachNovaSonicRelay(server: Server): void {
   const wss = new WebSocketServer({ server, path: "/ws/interview" });
 
-  wss.on("connection", (ws: WebSocket) => {
-    console.log("[Sonic] Client connected");
+  wss.on("connection", (ws: WebSocket, req) => {
+    // The prepared session is looked up server-side from an opaque id. The
+    // questions and grading criteria never reach the browser, so the candidate
+    // cannot read what they are about to be asked.
+    const sessionId = new URL(req.url || "", "http://localhost").searchParams.get("sessionId");
+    const prepared = sessionId ? getSession(sessionId) : undefined;
+
+    const instructions = prepared
+      ? renderInterviewerPrompt(prepared.bank, prepared.candidateName)
+      : generateInterviewerSystemPrompt();
+
+    console.log(
+      prepared
+        ? `[Sonic] Client connected — session ${prepared.id} (${prepared.candidateName}, ` +
+            `${prepared.bank.role}, ${prepared.bank.durationMinutes}min, ` +
+            `${prepared.bank.questions.length} questions)`
+        : "[Sonic] Client connected — no prepared session, using default interviewer"
+    );
 
     const session: SonicSession = {
       queue: new EventQueue(),
@@ -210,7 +228,7 @@ export function attachNovaSonicRelay(server: Server): void {
         textInput: {
           promptName: session.promptName,
           contentName: systemContentName,
-          content: generateInterviewerSystemPrompt(),
+          content: instructions,
         },
       },
     });
@@ -248,10 +266,12 @@ export function attachNovaSonicRelay(server: Server): void {
 
     // --- Inbound: Bedrock -> browser ---------------------------------------
 
-    // Sonic emits each assistant line twice: once as SPECULATIVE while it is
-    // still generating, then again as FINAL. Forwarding both double-posts the
-    // transcript, so track the stage per content block and drop speculative text.
-    const speculativeContent = new Set<string>();
+    // Sonic can emit the same assistant line more than once — a SPECULATIVE pass
+    // while it is still generating, then a FINAL one. Relying on the
+    // generationStage marker proved fragile (some blocks arrive with no stage at
+    // all, and filtering on it silently dropped every interviewer line). Content
+    // equality is the robust check: emit each distinct line once per speaker.
+    const lastEmitted: Record<string, string> = {};
 
     (async () => {
       try {
@@ -281,32 +301,16 @@ export function attachNovaSonicRelay(server: Server): void {
           } else if (event.textOutput) {
             // role USER  -> Sonic's transcription of the candidate
             // role ASSISTANT -> what the interviewer said
-            const { role, content, contentId } = event.textOutput;
-            if (contentId && speculativeContent.has(contentId)) {
-              speculativeContent.delete(contentId);
-            } else {
-              send({
-                type: "transcript",
-                sender: role === "USER" ? "candidate" : "interviewer",
-                text: content,
-              });
+            const { role, content } = event.textOutput;
+            const sender = role === "USER" ? "candidate" : "interviewer";
+            const text = String(content || "").trim();
+
+            if (text && lastEmitted[sender] !== text) {
+              lastEmitted[sender] = text;
+              send({ type: "transcript", sender, text });
             }
-          } else if (event.contentStart) {
-            if (event.contentStart.type === "AUDIO") {
-              send({ type: "speech_start" });
-            } else if (event.contentStart.type === "TEXT") {
-              let stage: string | undefined;
-              try {
-                stage = JSON.parse(
-                  event.contentStart.additionalModelFields || "{}"
-                ).generationStage;
-              } catch {
-                /* absent on candidate ASR blocks */
-              }
-              if (stage === "SPECULATIVE" && event.contentStart.contentId) {
-                speculativeContent.add(event.contentStart.contentId);
-              }
-            }
+          } else if (event.contentStart?.type === "AUDIO") {
+            send({ type: "speech_start" });
           }
 
           if (event.contentEnd) {

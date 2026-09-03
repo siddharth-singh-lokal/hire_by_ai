@@ -51,12 +51,43 @@ export interface UseNovaSonicInterviewReturn {
 const MIC_SAMPLE_RATE = 16000; // what Nova Sonic accepts
 const SPEAKER_SAMPLE_RATE = 24000; // what Nova Sonic emits
 
-function backendWsUrl(): string {
-  const httpUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
-  return httpUrl.replace(/^http/, "ws") + "/ws/interview";
+/**
+ * Volume meters drive an animated canvas, not a readout — 20fps is smooth to the
+ * eye and a twentieth of the re-renders. Without this cap the interview page
+ * re-rendered on every audio chunk and the whole UI stuttered.
+ */
+const METER_INTERVAL_MS = 50;
+
+/** Chunked base64 — a per-byte string concat stalls on larger buffers. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK) as unknown as number[]
+    );
+  }
+  return btoa(binary);
 }
 
-export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
+function fromBase64(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function backendWsUrl(sessionId?: string | null): string {
+  const httpUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
+  const base = httpUrl.replace(/^http/, "ws") + "/ws/interview";
+  // Only the opaque id travels to the browser. The questions and grading
+  // criteria stay server-side, so a candidate cannot read what they will be
+  // asked or how it will be scored.
+  return sessionId ? `${base}?sessionId=${encodeURIComponent(sessionId)}` : base;
+}
+
+export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicInterviewReturn {
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
@@ -78,6 +109,8 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
 
   /** Decays the user's meter so it falls smoothly instead of snapping to zero. */
   const userVolumeRef = useRef(0);
+  const lastUserMeterRef = useRef(0);
+  const lastAiMeterRef = useRef(0);
 
   const cleanup = useCallback(() => {
     closingRef.current = true;
@@ -157,7 +190,7 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
       speakerContextRef.current = speakerContext;
       await speakerContext.audioWorklet.addModule("/worklets/playback-processor.js");
 
-      const ws = new WebSocket(backendWsUrl());
+      const ws = new WebSocket(backendWsUrl(sessionId));
       wsRef.current = ws;
 
       await new Promise<void>((resolve, reject) => {
@@ -182,10 +215,16 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
       playbackNode.port.onmessage = (e) => {
         const { type, playing, peak } = e.data || {};
         if (type === "playing") {
+          // Transitions are never throttled — the speaking indicator must be
+          // immediate or the orb lags behind the voice.
           setIsAiSpeaking(playing);
           if (!playing) setAiVolume(0);
         } else if (type === "level") {
-          setAiVolume(peak);
+          const now = performance.now();
+          if (now - lastAiMeterRef.current >= METER_INTERVAL_MS) {
+            lastAiMeterRef.current = now;
+            setAiVolume(peak);
+          }
         }
       };
 
@@ -205,16 +244,20 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
         if (!pcm) return;
 
         if (wsRef.current?.readyState === WebSocket.OPEN) {
-          const bytes = new Uint8Array(pcm);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          wsRef.current.send(JSON.stringify({ type: "audio", data: btoa(binary) }));
+          wsRef.current.send(
+            JSON.stringify({ type: "audio", data: toBase64(new Uint8Array(pcm)) })
+          );
         }
 
         // Smooth the meter: fast attack, slow release.
         userVolumeRef.current = Math.max(peak, userVolumeRef.current * 0.85);
-        setUserVolume(userVolumeRef.current);
-        setIsUserSpeaking(userVolumeRef.current > 0.04);
+
+        const now = performance.now();
+        if (now - lastUserMeterRef.current >= METER_INTERVAL_MS) {
+          lastUserMeterRef.current = now;
+          setUserVolume(userVolumeRef.current);
+          setIsUserSpeaking(userVolumeRef.current > 0.04);
+        }
       };
 
       ws.onmessage = (event) => {
@@ -226,9 +269,7 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
             break;
 
           case "audio": {
-            const binary = atob(msg.data);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const bytes = fromBase64(msg.data);
             playbackNodeRef.current?.port.postMessage(
               { type: "push", pcm: bytes.buffer },
               [bytes.buffer]
@@ -271,7 +312,7 @@ export function useNovaSonicInterview(): UseNovaSonicInterviewReturn {
       setConnectionState("error");
       cleanup();
     }
-  }, [appendTranscript, cleanup]);
+  }, [appendTranscript, cleanup, sessionId]);
 
   const endInterview = useCallback(() => {
     cleanup();

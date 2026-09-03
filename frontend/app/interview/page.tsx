@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Mic,
   MicOff,
@@ -28,8 +28,12 @@ import { startSession, RED_FLAG_LABELS } from "@/lib/sessionStore";
 import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
 import { CANDIDATE_RESUME } from "@/lib/resumeData";
 
-export default function InterviewPage() {
+function InterviewRoom() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Set by the setup page. Identifies the prepared question bank server-side.
+  const sessionId = searchParams.get("sessionId");
+
   const {
     connectionState,
     error,
@@ -46,7 +50,7 @@ export default function InterviewPage() {
     toggleMute,
     toggleVideo,
     cancelAiResponse,
-  } = useNovaSonicInterview();
+  } = useNovaSonicInterview(sessionId);
 
   // Video element ref for candidate camera stream
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -196,6 +200,7 @@ export default function InterviewPage() {
     // session store (with their snapshots); localStorage carries the plain
     // metadata so the evaluation request survives independently of the blobs.
     try {
+      localStorage.setItem("interview_session_id", sessionId || "");
       localStorage.setItem("interview_transcripts", JSON.stringify(transcripts));
       localStorage.setItem("interview_duration", String(elapsedSeconds));
       localStorage.setItem(
@@ -805,5 +810,24 @@ export default function InterviewPage() {
         </div>
       )}
     </div>
+  );
+}
+
+
+/**
+ * useSearchParams requires a Suspense boundary or the App Router refuses to
+ * prerender this route.
+ */
+export default function InterviewPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 text-sm">
+          Loading interview room…
+        </div>
+      }
+    >
+      <InterviewRoom />
+    </Suspense>
   );
 }
