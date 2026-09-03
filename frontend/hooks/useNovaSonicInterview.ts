@@ -54,6 +54,8 @@ export interface UseNovaSonicInterviewReturn {
   endRequested: boolean;
   /** Set when the interviewer says her closing line — the interview is over. */
   concluded: boolean;
+  /** True while the client is re-establishing a dropped connection. */
+  reconnecting: boolean;
 }
 
 /**
@@ -73,6 +75,13 @@ export interface UseNovaSonicInterviewReturn {
  * re-rendered on every audio chunk and the whole UI stuttered.
  */
 const METER_INTERVAL_MS = 50;
+
+/**
+ * Client-side WebSocket reconnect cap. The relay retries the Bedrock stream on
+ * its own; this covers the *other* connection — the browser↔relay socket dropping
+ * (backend restart, network blip) or failing to open in the first place.
+ */
+const MAX_WS_RECONNECTS = 5;
 
 /**
  * A barge-in flush throws away buffered speech, so a spurious one is heard as
@@ -140,6 +149,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const [userVolume, setUserVolume] = useState(0);
   const [endRequested, setEndRequested] = useState(false);
   const [concluded, setConcluded] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -147,6 +157,13 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const playbackNodeRef = useRef<AudioWorkletNode | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const closingRef = useRef(false);
+  /** User (or the interview flow) intentionally ended — never auto-reconnect. */
+  const intentionalCloseRef = useRef(false);
+  /** Hard error (permission, creds, no-session) — reconnecting cannot help. */
+  const noReconnectRef = useRef(false);
+  const wsAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startInterviewRef = useRef<(() => Promise<void>) | null>(null);
 
   /** Decays the user's meter so it falls smoothly instead of snapping to zero. */
   const userVolumeRef = useRef(0);
@@ -164,6 +181,10 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
   const cleanup = useCallback(() => {
     closingRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "stop" }));
@@ -191,6 +212,33 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
   useEffect(() => cleanup, [cleanup]);
 
+  // Client-side reconnect for the browser↔relay WebSocket. The relay handles
+  // Bedrock stream drops itself; this covers the socket to the relay going away —
+  // a backend restart, a network blip, or the relay giving up after its own
+  // retries. A user-initiated end and non-recoverable errors are excluded.
+  const scheduleReconnect = useCallback(() => {
+    if (intentionalCloseRef.current || noReconnectRef.current) return;
+    if (reconnectTimerRef.current) return;
+    if (wsAttemptsRef.current >= MAX_WS_RECONNECTS) {
+      setReconnecting(false);
+      setConnectionState("error");
+      setError("Lost the connection and couldn't get it back. Please rejoin.");
+      return;
+    }
+    wsAttemptsRef.current += 1;
+    setReconnecting(true);
+    const delay = Math.min(8000, 800 * wsAttemptsRef.current);
+    console.warn(
+      `[NovaSonic] connection lost — reconnecting ` +
+        `(attempt ${wsAttemptsRef.current}/${MAX_WS_RECONNECTS}) in ${delay}ms`
+    );
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (intentionalCloseRef.current || noReconnectRef.current) return;
+      startInterviewRef.current?.();
+    }, delay);
+  }, []);
+
   const appendTranscript = useCallback(
     (sender: "candidate" | "interviewer", text: string) => {
       if (!text?.trim()) return;
@@ -209,8 +257,12 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   );
 
   const startInterview = useCallback(async () => {
+    // Tear down any previous attempt so this is safe to call for a reconnect.
+    cleanup();
     setError(null);
     closingRef.current = false;
+    intentionalCloseRef.current = false;
+    noReconnectRef.current = false;
     setEndRequested(false);
     setConcluded(false);
     setConnectionState("requesting_permission");
@@ -260,6 +312,8 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
         switch (msg.type) {
           case "ready":
+            wsAttemptsRef.current = 0;
+            setReconnecting(false);
             setConnectionState("active");
             break;
 
@@ -294,6 +348,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             setIsAiSpeaking(false);
             setAiVolume(0);
             setError(null);
+            setReconnecting(true);
             console.warn(`[audio] voice stream dropped, reconnecting (attempt ${msg.attempt})`);
             break;
 
@@ -315,7 +370,16 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
           }
 
           case "error":
-            setError(msg.message || "The interview stream failed.");
+            setError(
+              [msg.error, msg.message].filter(Boolean).join(" — ") ||
+                "The interview stream failed."
+            );
+            // Non-recoverable (bad creds, no model access, no session) → don't
+            // loop. A recoverable error means the relay exhausted its own retries;
+            // the socket close that follows will drive a fresh client reconnect.
+            if (msg.recoverable === false || msg.error === "NO_SESSION") {
+              noReconnectRef.current = true;
+            }
             setConnectionState("error");
             break;
 
@@ -326,10 +390,14 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       };
 
       ws.onclose = () => {
-        // Don't clobber a surfaced error with a generic "disconnected".
-        if (!closingRef.current) {
+        if (closingRef.current) return; // our own teardown (restart or end)
+        if (intentionalCloseRef.current || noReconnectRef.current) {
           setConnectionState((s) => (s === "error" ? s : "disconnected"));
+          return;
         }
+        // Unexpected drop (network, backend restart) or a recoverable relay
+        // error — reconnect automatically.
+        scheduleReconnect();
       };
 
       await new Promise<void>((resolve, reject) => {
@@ -420,17 +488,35 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       }
     } catch (err: any) {
       console.error("[NovaSonic] start failed:", err);
+      const permission =
+        err?.name === "NotAllowedError" ||
+        err?.name === "NotFoundError" ||
+        err?.name === "NotReadableError";
       setError(
-        err?.name === "NotAllowedError"
+        permission
           ? "Camera and microphone access denied. Grant permission and try again."
           : err?.message || "Failed to start the interview."
       );
       setConnectionState("error");
       cleanup();
+      if (permission) {
+        // The user has to fix hardware/permission; retrying would just fail again.
+        noReconnectRef.current = true;
+      } else {
+        // Backend down / relay unreachable / transient — keep trying to connect.
+        closingRef.current = false;
+        scheduleReconnect();
+      }
     }
-  }, [appendTranscript, cleanup, sessionId]);
+  }, [appendTranscript, cleanup, sessionId, scheduleReconnect]);
+
+  // Keep a ref so the reconnect timer can invoke the latest startInterview.
+  useEffect(() => {
+    startInterviewRef.current = startInterview;
+  }, [startInterview]);
 
   const endInterview = useCallback(() => {
+    intentionalCloseRef.current = true;
     cleanup();
     setConnectionState("disconnected");
   }, [cleanup]);
@@ -501,5 +587,6 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     sendControl,
     endRequested,
     concluded,
+    reconnecting,
   };
 }

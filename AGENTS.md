@@ -154,6 +154,16 @@ nobody reviewed — refusing is the honest outcome.
   line. Dedupe on content with a rolling window instead.
 - **Control payloads arrive through the text channel** (e.g. `{"interrupted":true}`).
   Filter them or they land in the transcript.
+- **Two-layer reconnect.** The relay retries the *Bedrock* stream itself on
+  `RECOVERABLE` errors (`MAX_STREAM_ATTEMPTS`, resume-from-progress via
+  `buildResumeNote`), sending `{type:"reconnecting"}` while the browser socket
+  stays open. The client separately reconnects the *browser↔relay* WebSocket
+  (`scheduleReconnect`, `MAX_WS_RECONNECTS`) when that socket drops or fails to
+  open — backend restart, network blip, or a non-recoverable relay error after its
+  retries. A reconnecting client re-attaches to the same in-progress session and
+  the relay resumes without re-greeting (the session already has transcripts).
+  A user-initiated end and hard errors (permission, creds, no-session) never
+  reconnect — those set `intentionalCloseRef` / `noReconnectRef`.
 
 ### The live prompt
 

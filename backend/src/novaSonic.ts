@@ -481,6 +481,22 @@ export function attachNovaSonicRelay(server: Server): void {
     // Fire the auto-end signal at most once, when she first says a closing line.
     let concludedSent = false;
 
+    /** What to tell a fresh stream so it resumes instead of starting over. */
+    const buildResumeNote = (): string => {
+      const answered = countAnswered(prepared.transcripts, prepared.bank.questions.length);
+      const covered = prepared.bank.questions
+        .map((q, i) => `${i + 1}. ${q.question}`)
+        .filter((_, i) => i < answered);
+      return (
+        `RESUMING AN INTERRUPTED CALL. The connection dropped and has been restored. ` +
+        `Do NOT reintroduce yourself and do NOT start over.\n` +
+        (covered.length
+          ? `Already asked:\n${covered.join("\n")}\n`
+          : `Nothing substantive has been covered yet.\n`) +
+        `Say one short line acknowledging the drop, then continue from where you left off.`
+      );
+    };
+
     const startStream = async (resumeNote?: string): Promise<void> => {
       bootstrap(resumeNote);
 
@@ -581,21 +597,8 @@ export function attachNovaSonicRelay(server: Server): void {
           send({ type: "reconnecting", attempt });
 
           // Sonic has no memory of the dropped stream. Hand it back what has
-          // already been covered so it continues instead of reintroducing
-          // itself and re-asking question one.
-          const covered = prepared.bank.questions
-            .map((q, i) => `${i + 1}. ${q.question}`)
-            .filter((_, i) =>
-              i < countAnswered(prepared.transcripts, prepared.bank.questions.length)
-            );
-
-          const resumeNote =
-            `RESUMING AN INTERRUPTED CALL. The connection dropped and has been restored. ` +
-            `Do NOT reintroduce yourself and do NOT start over.\n` +
-            (covered.length
-              ? `Already asked:\n${covered.join("\n")}\n`
-              : `Nothing substantive has been covered yet.\n`) +
-            `Say one short line acknowledging the drop, then continue from where you left off.`;
+          // already been covered so it continues instead of reintroducing itself.
+          const resumeNote = buildResumeNote();
 
           session = newSonicSession();
           // Exponential-ish backoff; Bedrock faults often clear within a second.
@@ -636,7 +639,13 @@ export function attachNovaSonicRelay(server: Server): void {
       }, 3000);
     };
 
-    startStream().catch((e) => console.error("[Sonic] startStream:", e?.message));
+    // If this session already has candidate turns, the browser is reconnecting
+    // (its WebSocket dropped — e.g. a backend restart) rather than starting fresh,
+    // so resume from progress instead of greeting again.
+    const resuming = prepared.transcripts.some((t) => t.sender === "candidate");
+    startStream(resuming ? buildResumeNote() : undefined).catch((e) =>
+      console.error("[Sonic] startStream:", e?.message)
+    );
   });
 
   console.log("[Sonic] Relay listening on ws://localhost:<port>/ws/interview");

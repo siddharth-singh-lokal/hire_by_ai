@@ -79,6 +79,7 @@ function InterviewRoom() {
     sendTextMessage,
     endRequested,
     concluded,
+    reconnecting,
   } = useNovaSonicInterview(sessionId);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -452,10 +453,44 @@ function InterviewRoom() {
               isUserSpeaking={isUserSpeaking}
               connectionState={connectionState}
             />
-            {connectionState === "connecting" && (
+            {(connectionState === "connecting" || reconnecting) && (
               <div className="absolute inset-0 bg-slate-950/70 flex flex-col items-center justify-center gap-3">
                 <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
-                <p className="text-xs text-slate-400">Connecting…</p>
+                <p className="text-xs text-slate-400">
+                  {reconnecting ? "Connection dropped — reconnecting…" : "Connecting…"}
+                </p>
+              </div>
+            )}
+
+            {/* Reconnect gave up, or a non-recoverable error — let the candidate
+                rejoin or submit. The transcript is saved server-side and graded,
+                and a rejoin resumes from where it left off. */}
+            {connectionState === "error" && !reconnecting && (
+              <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center gap-4 p-6 text-center">
+                <AlertCircle className="w-8 h-8 text-rose-400" />
+                <div>
+                  <p className="text-sm font-semibold text-rose-300">Connection lost</p>
+                  <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto leading-relaxed">
+                    {error || "The interview stream stopped unexpectedly."}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-2">
+                    Your conversation so far has been saved.
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => startInterview()}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500"
+                  >
+                    Rejoin
+                  </button>
+                  <button
+                    onClick={() => finishInterview("connection lost")}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700"
+                  >
+                    End &amp; submit
+                  </button>
+                </div>
               </div>
             )}
           </div>
