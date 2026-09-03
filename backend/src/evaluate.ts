@@ -25,10 +25,32 @@ interface EvaluateInput {
   durationSeconds: number;
   redFlags: { type: string; description: string; timeInSeconds: number }[];
   orgGrounded: boolean;
+  /** Times the voice stream dropped and was re-established mid-call. */
+  streamDrops: number;
+}
+
+/**
+ * A deterministic read on whether the platform, not the candidate, shaped
+ * this transcript. Handed to the grader as a hint; the grader confirms or
+ * overrides it with a reason, because whether drops actually mattered depends
+ * on what was said around them.
+ */
+export function assessCallQuality(input: {
+  streamDrops: number;
+  transcripts: { sender: string; text: string }[];
+}): "clean" | "degraded" | "compromised" {
+  const candidateWords = input.transcripts
+    .filter((t) => t.sender === "candidate")
+    .reduce((n, t) => n + t.text.split(/\s+/).filter(Boolean).length, 0);
+  if (input.streamDrops >= 3) return "compromised";
+  if (input.streamDrops >= 1 && candidateWords < 80) return "compromised";
+  if (input.streamDrops >= 1) return "degraded";
+  return "clean";
 }
 
 function buildPrompt(input: EvaluateInput): string {
   const { bank, redFlags } = input;
+  const callQuality = assessCallQuality(input);
 
   return `You are summarising a Round-0 SCREENING conversation for a hiring manager.
 
@@ -46,6 +68,7 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 - **A skill they did not list but clearly have is a PLUS.** Resumes undersell constantly. Credit demonstrated ability regardless of whether it was claimed.
 - **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
 - **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
+- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
 
 THE SIGNAL THAT MATTERS MOST
 The single most valuable thing you can detect is a MISMATCH between what the resume claims and what the person can actually discuss. Someone who did the work can explain a decision they rejected and why. Someone narrating a README cannot. Weight that heavily. Everything else is secondary.
@@ -76,6 +99,13 @@ ${bank.unevidencedRequirements.map((r) => `- ${r}`).join("\n") || "(none)"}
 RESUME CLAIMS THE INTERVIEW WAS MEANT TO VERIFY:
 ${bank.claimsToVerify.map((c) => `- "${c.claim}" (relevant to: ${c.jdRequirement})`).join("\n") || "(none)"}
 
+CALL QUALITY — read before scoring anything.
+${
+  input.streamDrops > 0
+    ? `The voice connection dropped and was re-established ${input.streamDrops} time(s) during this call (automatic assessment: ${callQuality.toUpperCase()}). Each drop means the candidate heard silence, the interviewer may have repeated herself or re-asked a question, and lines like "hello?", "are you there?", "can you hear me" are the candidate checking the line — not disengagement. Answers cut off mid-sentence around a drop were cut off by the platform. Do NOT hold any of this against the candidate. If the drops left too little clean conversation to judge fairly, the honest verdict is "Needs discussion" with rescreenRecommended = true and a screenQualityNote saying so — a "Do not advance" is only defensible if the clean portions contain POSITIVE evidence of a mismatch on their own.`
+    : `The voice connection held for the whole call (automatic assessment: CLEAN).`
+}
+
 ${
   redFlags.length
     ? `PROCTORING INCIDENTS — integrity signal ONLY. Factor into authenticity and mention in redFlags where warranted. Do NOT let these lower technical or reasoning scores; an unexplained tab switch says nothing about whether someone understands connection pooling:
@@ -102,12 +132,17 @@ ADVANCEMENT LANGUAGE, NOT HIRING LANGUAGE. The recommendation describes what to 
 
 Reserve "Do not advance" for real mismatches: claims they could not support, or a requirement they were directly asked about and clearly could not meet. A quiet or nervous candidate who still reasoned soundly is NOT a "do not advance".
 
+"verdict" and "recommendationReason" must say the same thing. If the reason says "advance with focus", the verdict is "Advance with focus" — never "Advance" with a caveat buried in the prose.
+
 Use 3 in "ratings" for anything the conversation did not establish.
 
 Return ONLY a JSON object. No comments, no trailing commas, no prose around it:
 {
   "verdict": "Advance" | "Advance with focus" | "Needs discussion" | "Do not advance",
   "overallScore": 0-100,
+  "screenQuality": "clean" | "degraded" | "compromised",
+  "rescreenRecommended": true | false,
+  "screenQualityNote": "one sentence for the recruiter on whether the platform affected this screen, or an empty string if it did not",
   "ratings": { "technicalCompetence": 1-5, "systemDesign": 1-5, "communication": 1-5, "authenticity": 1-5 },
   "axisScores": [{ "axis", "score": 1-5, "justification", "evidence": ["verbatim quote"] }],
   "summary": "what this interview established, for a hiring manager",
@@ -155,8 +190,16 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
 
   const parsed = extractJson(text);
 
+  const modelQuality = ["clean", "degraded", "compromised"].includes(parsed.screenQuality)
+    ? parsed.screenQuality
+    : assessCallQuality(input);
+
   return {
     ...parsed,
+    screenQuality: modelQuality,
+    rescreenRecommended: Boolean(parsed.rescreenRecommended),
+    screenQualityNote: String(parsed.screenQualityNote || ""),
+    streamDrops: input.streamDrops,
     candidateName: input.candidateName,
     role: input.bank.role,
     seniority: input.bank.seniority,

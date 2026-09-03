@@ -3,7 +3,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { bedrockClient, SONIC_MODEL_ID } from "./bedrock";
-import { getSession, updateSession, appendTranscript } from "./sessionStore";
+import { getSession, updateSession, appendTranscript, recordStreamDrop } from "./sessionStore";
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
 
@@ -190,17 +190,16 @@ function newSonicSession(): SonicSession {
  * introduction, which the grader then correctly reported as empty.
  */
 const RECOVERABLE = /ModelStreamError|ServiceUnavailable|Throttl|InternalServer|NGHTTP2|ECONNRESET|EPIPE|stream closed/i;
-const MAX_STREAM_ATTEMPTS = 4;
-
 /**
- * Rough count of how far the interview got, used to tell a reconnected stream
- * what has already been asked. Deliberately approximate — over-reporting risks
- * skipping a question, so it is biased low.
+ * Consecutive failed attempts before giving up. The counter resets once a
+ * re-established stream has carried a real candidate turn: a call that drops
+ * four times over five minutes but works in between is a flaky call, not a dead
+ * one, and used to be killed on the fourth drop mid-answer.
  */
-function countAnswered(transcripts: { sender: string }[], total: number): number {
-  const answers = transcripts.filter((t) => t.sender === "candidate").length;
-  return Math.min(total, Math.max(0, answers));
-}
+const MAX_STREAM_ATTEMPTS = 5;
+
+/** How much recent conversation a resumed stream is shown. */
+const RESUME_TAIL_LINES = 12;
 
 export function attachNovaSonicRelay(server: Server): void {
   const wss = new WebSocketServer({ server, path: "/ws/interview" });
@@ -229,8 +228,6 @@ export function attachNovaSonicRelay(server: Server): void {
       ws.close();
       return;
     }
-
-    const instructions = renderInterviewerPrompt(prepared.bank, prepared.candidateName);
 
     if (prepared.status === "ready") {
       updateSession(prepared.id, { status: "in_progress", startedAt: Date.now() });
@@ -428,7 +425,10 @@ export function attachNovaSonicRelay(server: Server): void {
         textInput: {
           promptName: session.promptName,
           contentName: systemContentName,
-          content: resumeNote ? `${instructions}\n\n${resumeNote}` : instructions,
+          // On a resume the opening instructions are replaced by the resume
+          // note. Appending it after them left "HOW TO OPEN" in force, and the
+          // interviewer greeted the candidate afresh after every drop.
+          content: renderInterviewerPrompt(prepared.bank, prepared.candidateName, { resumeNote }),
         },
       },
     });
@@ -481,19 +481,31 @@ export function attachNovaSonicRelay(server: Server): void {
     // Fire the auto-end signal at most once, when she first says a closing line.
     let concludedSent = false;
 
-    /** What to tell a fresh stream so it resumes instead of starting over. */
+    /**
+     * What to tell a fresh stream so it resumes instead of starting over.
+     *
+     * Shows the model the tail of the actual conversation rather than a count.
+     * The earlier version counted candidate transcript lines as "questions
+     * answered" — but the ASR emits several lines per utterance ("two", "hello",
+     * "yeah") — so after one drop it told the interviewer both questions were
+     * done and she skipped straight to a scenario she had never asked.
+     */
     const buildResumeNote = (): string => {
-      const answered = countAnswered(prepared.transcripts, prepared.bank.questions.length);
-      const covered = prepared.bank.questions
-        .map((q, i) => `${i + 1}. ${q.question}`)
-        .filter((_, i) => i < answered);
+      const name = prepared.candidateName;
+      const tail = prepared.transcripts
+        .slice(-RESUME_TAIL_LINES)
+        .map((t) => `${t.sender === "candidate" ? name : "You"}: ${t.text}`)
+        .join("\n");
       return (
-        `RESUMING AN INTERRUPTED CALL. The connection dropped and has been restored. ` +
-        `Do NOT reintroduce yourself and do NOT start over.\n` +
-        (covered.length
-          ? `Already asked:\n${covered.join("\n")}\n`
-          : `Nothing substantive has been covered yet.\n`) +
-        `Say one short line acknowledging the drop, then continue from where you left off.`
+        `The call dropped and has just been restored. You are MID-INTERVIEW. ` +
+        `Do NOT greet ${name} again, do NOT reintroduce yourself, and do NOT start from the first question.\n\n` +
+        (tail
+          ? `The end of the conversation so far, verbatim:\n${tail}\n\n`
+          : `You had only just said hello; nothing has been asked yet.\n\n`) +
+        `When ${name} next speaks, say one short line acknowledging the drop ("sorry, we lost the connection for a moment"), ` +
+        `then pick up exactly where this left off: if a question was asked and not yet answered, ask it again briefly; ` +
+        `otherwise move to the next question in your list that does not appear above. ` +
+        `Any question not visible above has NOT been asked yet.`
       );
     };
 
@@ -544,6 +556,11 @@ export function attachNovaSonicRelay(server: Server): void {
               // Persist server-side so the result survives the browser closing.
               appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
 
+              // A real candidate turn proves this stream works: reset the
+              // consecutive-failure budget so a flaky call is not killed on its
+              // Nth drop mid-answer.
+              if (sender === "candidate" && attempt > 0) attempt = 0;
+
               // If the candidate asks to stop, there is no signal left to
               // gather — respect it rather than pressing on.
               if (sender === "candidate" && detectsEndIntent(text)) {
@@ -587,9 +604,12 @@ export function attachNovaSonicRelay(server: Server): void {
         const recoverable = RECOVERABLE.test(label);
 
         if (recoverable && !finished && ws.readyState === WebSocket.OPEN && ++attempt <= MAX_STREAM_ATTEMPTS) {
+          // Counted per session so the grader and the recruiter can tell a
+          // broken call from a weak candidate.
+          const drops = recordStreamDrop(prepared.id);
           console.warn(
             `[Sonic] ${prepared.id} — stream dropped (${label}). ` +
-              `Reconnecting, attempt ${attempt}/${MAX_STREAM_ATTEMPTS}.`
+              `Reconnecting, attempt ${attempt}/${MAX_STREAM_ATTEMPTS} (drop #${drops} this session).`
           );
 
           // Tell the client so it can flush stale audio and show a brief notice

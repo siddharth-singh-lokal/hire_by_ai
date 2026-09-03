@@ -243,7 +243,7 @@ Return ONLY a JSON object:
   "questions": [{"id","kind","question","intent","axes","escalations","fallback","strongAnswer","weakAnswer","scenarioId","minutes"}],
   "claimsToVerify": [{"claim","jdRequirement"}],
   "unevidencedRequirements": ["..."],
-  "openingLine": "TWO SENTENCES MAXIMUM. Greet them and say what the next N minutes hold. Nothing else — no reassurance about trick questions, no explanation of the format, no invitation to think out loud. This is spoken aloud, and every second here is a second the candidate does not get to answer in."
+  "openingLine": "TWO SENTENCES MAXIMUM. Address the candidate ONLY as the literal token {{name}} — never a real name. The name on the resume is often not what the candidate goes by, and the system substitutes the correct one at call time. Greet them and say what the next N minutes hold. Nothing else — no reassurance about trick questions, no explanation of the format, no invitation to think out loud. This is spoken aloud, and every second here is a second the candidate does not get to answer in."
 }`;
 }
 
@@ -392,7 +392,41 @@ export async function generateQuestionBank(opts: {
  * The agent receives ONLY this. It has no retrieval tools and no connection to
  * Slack or Confluence — it cannot leak what it was never given.
  */
-export function renderInterviewerPrompt(bank: QuestionBank, candidateName = "the candidate"): string {
+/**
+ * Puts the candidate's actual name into the opening line.
+ *
+ * The generator writes `{{name}}`; older banks baked a name in, and it was
+ * sometimes the wrong one — the generator read "Sai Kumar" off a resume whose
+ * owner had signed up as "Venkata Sai Reddy", and the interviewer used the
+ * wrong name for the whole call. The admin-entered name always wins.
+ */
+export function personaliseOpening(openingLine: string, candidateName: string): string {
+  const line = String(openingLine || "");
+  if (/\{\{\s*name\s*\}\}/i.test(line)) return line.replace(/\{\{\s*name\s*\}\}/gi, candidateName);
+  // Legacy bank: swap whatever name follows the greeting for the real one.
+  return line.replace(/^((?:hey|hi|hello)\s+)([^,—–\-!.]{1,40}?)(\s*[,—–\-!.])/i, `$1${candidateName}$3`);
+}
+
+export interface RenderOptions {
+  /**
+   * Set when a dropped call is being re-established. Replaces the opening
+   * instructions with the resume note, so the agent continues instead of
+   * greeting the candidate a second time.
+   */
+  resumeNote?: string;
+}
+
+/**
+ * Renders the bank into the instruction set the live voice agent runs on.
+ *
+ * The agent receives ONLY this. It has no retrieval tools and no connection to
+ * Slack or Confluence — it cannot leak what it was never given.
+ */
+export function renderInterviewerPrompt(
+  bank: QuestionBank,
+  candidateName = "the candidate",
+  options: RenderOptions = {}
+): string {
   // The live agent gets ONLY what it needs to hold the conversation: the
   // question, how to go deeper, and how to back off.
   //
@@ -413,12 +447,21 @@ ${i + 1}. [~${q.minutes} min] ${q.question}${
     )
     .join("\n");
 
+  const openingSection = options.resumeNote
+    ? `THIS IS A RESUMED CALL — READ THIS FIRST
+${options.resumeNote}`
+    : `HOW TO OPEN
+${personaliseOpening(bank.openingLine, candidateName)}`;
+
   return `You are Sarah Chen, a senior engineer conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
 
-The candidate's name is ${candidateName}. Greet them by name and use it naturally once or twice — not in every turn, which sounds robotic.
+The candidate's name is ${candidateName}. ${
+    options.resumeNote
+      ? "Use their name sparingly — you have already greeted them."
+      : "Greet them by name and use it naturally once or twice — not in every turn, which sounds robotic."
+  }
 
-HOW TO OPEN
-${bank.openingLine}
+${openingSection}
 
 YOUR QUESTIONS — work through these in order. Ask them as written, in your own voice. Everything in this list is for you alone; never read the bracketed timings or the follow-up notes aloud, and never tell the candidate what you are hoping to hear.
 ${questionBlock}
@@ -426,6 +469,8 @@ ${questionBlock}
 HOW TO CONDUCT THIS
 
 KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or three sentences, then stop talking. You are on a voice call — a thirty-second monologue is unbearable to sit through and burns interview time the candidate needs for answering. Ask the question and stop. Do not preamble, do not restate the question a second way, do not explain why you are asking.
+
+LANGUAGE. Candidates may answer in English, Hindi, or a mix of the two — many people here think in Hindi and switch mid-sentence. That is completely fine and says nothing about their ability. Understand them either way, never comment on their English or ask them to switch, and reply in clear, simple English unless they clearly prefer Hindi, in which case mirror them.
 
 - You have ${bank.durationMinutes} minutes total. Watch your pacing. Spending several minutes on the intro and rushing the technical questions is the most common way this interview fails.
 - Ask ONE question at a time, then stop and listen. Never stack multiple questions into one turn.
@@ -436,6 +481,7 @@ KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or thr
 - Stay inside the candidate's field. The questions above are already scoped to their role; ask those, and if you improvise a follow-up keep it in their domain. Never drift into backend, infrastructure, or distributed-systems topics unless this is a backend/infra role.
 - NEVER state what you are assessing, what a good answer contains, or what you were hoping they would say — not before, during, or after a question. If they ask how they did, say the team will follow up.
 - If the candidate asks about internal systems, company specifics, or anything you were not given, say you cannot go into detail and return to the question. You genuinely do not have that information.
+- If the candidate says something unrelated to the interview (a joke, a test, a request for something else), decline in one light sentence and return to your question. Do not lecture.
 - Close by thanking them and telling them the team will follow up.
 
 IMPORTANT: You are gathering evidence for a human hiring manager. You are not making a hire decision, and you must never tell the candidate how they did.`;

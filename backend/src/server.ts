@@ -187,6 +187,9 @@ app.get("/api/admin/sessions", (_req: Request, res: Response) => {
       overallScore: s.scorecard?.overallScore,
       transcriptCount: s.transcripts.length,
       gradingError: s.gradingError,
+      streamDrops: s.streamDrops || 0,
+      screenQuality: s.scorecard?.screenQuality,
+      rescreenRecommended: s.scorecard?.rescreenRecommended,
     })),
   });
 });

@@ -76,6 +76,14 @@ export interface InterviewSession {
   gradingError?: string;
   /** Why the interview ended early, when it did. */
   terminationReason?: string;
+  /**
+   * How many times the Bedrock voice stream dropped and was re-established
+   * mid-interview. Recorded by the relay. The grader is told about it so a
+   * candidate is never marked down for fragmentation the platform caused, and
+   * the scorecard surfaces it so a recruiter can tell "weak answers" from
+   * "broken call" at a glance.
+   */
+  streamDrops?: number;
 }
 
 const sessions = new Map<string, InterviewSession>();
@@ -84,13 +92,102 @@ const byEmail = new Map<string, string>();
 
 /** Gitignored: contains candidate names, emails and transcripts. */
 const STORE_PATH = path.join(__dirname, "..", ".sessions.json");
+/**
+ * Proctoring evidence (base64 JPEG snapshots and ~6s video clips) lives in its
+ * own directory, one file per session, written once when the interview
+ * completes. It must stay OUT of the hot store: a single clip is ~2.7MB of
+ * base64, and the store used to be rewritten in full — synchronously — on every
+ * transcript line. With two sessions' worth of clips that was an 8MB
+ * JSON.stringify + writeFileSync on the same event loop that relays the live
+ * audio, several times a second while the interviewer spoke. It grew with every
+ * interview of the day, and it was heard as audio stutter.
+ */
+const EVIDENCE_DIR = path.join(__dirname, "..", ".evidence");
 
-function persist(): void {
+/** Coalesces bursts of updates (ASR emits several lines per utterance). */
+const PERSIST_DEBOUNCE_MS = 250;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistInFlight = false;
+let persistDirty = false;
+
+/** The store without evidence blobs — small enough to rewrite freely. */
+function serialiseStore(): string {
+  const rows = [...sessions.values()].map((s) => ({
+    ...s,
+    redFlags: s.redFlags.map(({ snapshot, clip, ...flag }) => flag),
+  }));
+  return JSON.stringify(rows);
+}
+
+async function flushPersist(): Promise<void> {
+  if (persistInFlight) {
+    persistDirty = true;
+    return;
+  }
+  persistInFlight = true;
   try {
-    fs.writeFileSync(STORE_PATH, JSON.stringify([...sessions.values()]));
+    // JSON.stringify is still synchronous, but without the blobs it is tens of
+    // kilobytes. Write to a temp file and rename so a crash mid-write can never
+    // leave a truncated store behind.
+    const body = serialiseStore();
+    const tmp = `${STORE_PATH}.tmp`;
+    await fs.promises.writeFile(tmp, body);
+    await fs.promises.rename(tmp, STORE_PATH);
   } catch (err: any) {
     // Persistence is a convenience, never a reason to fail a live interview.
     console.error("[sessionStore] Could not persist:", err?.message);
+  } finally {
+    persistInFlight = false;
+    if (persistDirty) {
+      persistDirty = false;
+      schedulePersist();
+    }
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    void flushPersist();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+function persist(): void {
+  schedulePersist();
+}
+
+/** Writes a session's evidence blobs to their own file. Once, on completion. */
+function persistEvidence(session: InterviewSession): void {
+  const hasBlobs = session.redFlags.some((f) => f.snapshot || f.clip);
+  if (!hasBlobs) return;
+  const file = path.join(EVIDENCE_DIR, `${session.id}.json`);
+  const body = JSON.stringify(
+    session.redFlags.map((f, i) => ({ index: i, snapshot: f.snapshot, clip: f.clip }))
+  );
+  fs.promises
+    .mkdir(EVIDENCE_DIR, { recursive: true })
+    .then(() => fs.promises.writeFile(`${file}.tmp`, body))
+    .then(() => fs.promises.rename(`${file}.tmp`, file))
+    .catch((err: any) => console.error("[sessionStore] Could not persist evidence:", err?.message));
+}
+
+/** Re-attaches evidence blobs to a restored session, if a file exists. */
+function restoreEvidence(session: InterviewSession): void {
+  const file = path.join(EVIDENCE_DIR, `${session.id}.json`);
+  if (!fs.existsSync(file)) return;
+  try {
+    const rows: { index: number; snapshot?: string; clip?: string }[] = JSON.parse(
+      fs.readFileSync(file, "utf8")
+    );
+    for (const row of rows) {
+      const flag = session.redFlags[row.index];
+      if (!flag) continue;
+      if (row.snapshot) flag.snapshot = row.snapshot;
+      if (row.clip) flag.clip = row.clip;
+    }
+  } catch (err: any) {
+    console.error(`[sessionStore] Could not restore evidence for ${session.id}:`, err?.message);
   }
 }
 
@@ -98,6 +195,7 @@ function restore(): void {
   if (!fs.existsSync(STORE_PATH)) return;
   try {
     const rows: InterviewSession[] = JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
+    let migrated = false;
     for (const row of rows) {
       // An interview that was mid-flight when the server died cannot resume,
       // so it is recorded as interrupted rather than left looking active.
@@ -105,10 +203,21 @@ function restore(): void {
         row.status = "terminated";
         row.terminationReason = row.terminationReason || "server restarted mid-interview";
       }
+      // Older stores kept the evidence blobs inline. Move them out on first load.
+      if (row.redFlags?.some((f) => f.snapshot || f.clip)) {
+        if (!fs.existsSync(path.join(EVIDENCE_DIR, `${row.id}.json`))) persistEvidence(row);
+        migrated = true;
+      } else {
+        restoreEvidence(row);
+      }
       sessions.set(row.id, row);
       byEmail.set(row.candidateEmail, row.id);
     }
     console.log(`[sessionStore] Restored ${rows.length} session(s)`);
+    if (migrated) {
+      console.log("[sessionStore] Moving inline proctoring evidence out of the hot store");
+      persist();
+    }
   } catch (err: any) {
     console.error("[sessionStore] Could not restore:", err?.message);
   }
@@ -195,7 +304,17 @@ export function updateSession(id: string, patch: Partial<InterviewSession>): voi
   const session = sessions.get(id);
   if (!session) return;
   Object.assign(session, patch);
+  if (patch.redFlags) persistEvidence(session);
   persist();
+}
+
+/** Increments the relay's drop counter for a session. */
+export function recordStreamDrop(id: string): number {
+  const session = sessions.get(id);
+  if (!session) return 0;
+  session.streamDrops = (session.streamDrops || 0) + 1;
+  persist();
+  return session.streamDrops;
 }
 
 export function listSessions(): InterviewSession[] {

@@ -101,4 +101,13 @@ export interface GroundedScorecard extends ScorecardEvaluation {
   gapMatrix: GapMatrixRow[];
   /** True when questions were grounded in the org Context Pack. */
   orgGrounded: boolean;
+  /**
+   * Whether the platform, rather than the candidate, shaped this transcript.
+   * "compromised" means the recruiter should read the verdict as provisional.
+   */
+  screenQuality?: "clean" | "degraded" | "compromised";
+  rescreenRecommended?: boolean;
+  screenQualityNote?: string;
+  /** Voice-stream drops during the call, as counted by the relay. */
+  streamDrops?: number;
 }

@@ -56,6 +56,7 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
         Math.round(((session.completedAt || Date.now()) - (session.startedAt || Date.now())) / 1000),
       redFlags: session.redFlags,
       orgGrounded: loadContextPack() !== null,
+      streamDrops: session.streamDrops || 0,
     });
 
     // The counterfactual runs alongside but must never block the real result.
