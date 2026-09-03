@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -16,14 +16,15 @@ import {
   ClipboardList,
   RotateCcw,
 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { IntegrityAuditPanel } from "@/components/IntegrityAuditPanel";
-import { evaluateInterview, BACKEND_URL } from "@/lib/api";
+import { fetchScorecard, regradeInterview, BACKEND_URL } from "@/lib/api";
 
 const VERDICT_STYLE: Record<string, string> = {
-  "Strong Hire": "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
-  Hire: "bg-teal-500/15 text-teal-300 border-teal-500/40",
-  Borderline: "bg-amber-500/15 text-amber-300 border-amber-500/40",
-  Reject: "bg-rose-500/15 text-rose-300 border-rose-500/40",
+  Advance: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
+  "Advance with focus": "bg-teal-500/15 text-teal-300 border-teal-500/40",
+  "Needs discussion": "bg-amber-500/15 text-amber-300 border-amber-500/40",
+  "Do not advance": "bg-rose-500/15 text-rose-300 border-rose-500/40",
 };
 
 const GAP_STYLE: Record<string, { icon: React.ReactNode; className: string }> = {
@@ -53,8 +54,12 @@ function ScoreBar({ score }: { score: number }) {
   );
 }
 
-export default function ScorecardPage() {
+function Scorecard() {
+  const searchParams = useSearchParams();
+  const sessionId = searchParams.get("sessionId");
+
   const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<any>(null);
   const [generic, setGeneric] = useState<any>(null);
@@ -62,51 +67,61 @@ export default function ScorecardPage() {
   const [tab, setTab] = useState<"evidence" | "gaps" | "transcript">("evidence");
 
   const run = useCallback(async () => {
-    setLoading(true);
+    if (!sessionId) {
+      setError("No interview selected. Open a scorecard from the admin console.");
+      setLoading(false);
+      return;
+    }
+
     setError(null);
     try {
-      const sessionId = localStorage.getItem("interview_session_id") || undefined;
-      const savedTranscripts = JSON.parse(
-        localStorage.getItem("interview_transcripts") || "[]"
-      );
-      const durationSeconds = parseInt(localStorage.getItem("interview_duration") || "0", 10);
-      const redFlags = JSON.parse(localStorage.getItem("interview_red_flags") || "[]");
+      const result = await fetchScorecard(sessionId);
+      setStatus(result.status);
 
-      if (!savedTranscripts.length) {
-        throw new Error(
-          "No interview transcript found. Run an interview from the setup page first."
-        );
+      if (result.status === "completed" && result.evaluation) {
+        setEvaluation(result.evaluation);
+        setGeneric(result.genericComparison || null);
+        setTranscripts(result.transcripts || []);
+        setLoading(false);
+      } else if (result.status === "failed") {
+        setError(result.message || "Grading failed for this interview.");
+        setTranscripts(result.transcripts || []);
+        setLoading(false);
+      } else {
+        // Still running or grading — grading takes about a minute, so poll.
+        setLoading(true);
       }
-
-      setTranscripts(savedTranscripts);
-      const result = await evaluateInterview({
-        sessionId,
-        transcripts: savedTranscripts,
-        durationSeconds,
-        redFlags,
-      });
-      setEvaluation(result.evaluation);
-      setGeneric(result.genericComparison);
     } catch (e: any) {
-      setError(e?.message || "Could not generate the scorecard.");
-    } finally {
+      setError(e?.message || "Could not load the scorecard.");
       setLoading(false);
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     run();
   }, [run]);
+
+  // Poll while the interview is still in progress or being graded.
+  useEffect(() => {
+    if (!loading || !sessionId) return;
+    const t = setInterval(run, 5000);
+    return () => clearInterval(t);
+  }, [loading, sessionId, run]);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4 text-slate-400">
         <Loader2 className="w-7 h-7 animate-spin text-indigo-400" />
         <div className="text-center">
-          <p className="text-sm font-medium text-slate-300">Grading the interview</p>
-          <p className="text-xs text-slate-500 mt-1">
-            Scoring against the rubric this interview was designed around, and
-            re-scoring with a generic rubric for comparison.
+          <p className="text-sm font-medium text-slate-300">
+            {status === "in_progress" || status === "ready"
+              ? "Interview still in progress"
+              : "Grading the interview"}
+          </p>
+          <p className="text-xs text-slate-500 mt-1 max-w-sm">
+            {status === "in_progress" || status === "ready"
+              ? "The scorecard appears here automatically once the candidate finishes."
+              : "Scoring against the rubric this interview was designed around, and re-scoring with a generic rubric for comparison. Takes about a minute."}
           </p>
         </div>
       </div>
@@ -119,18 +134,25 @@ export default function ScorecardPage() {
         <AlertCircle className="w-8 h-8 text-rose-400" />
         <p className="text-sm text-slate-300 max-w-md text-center">{error}</p>
         <div className="flex gap-3">
-          <button
-            onClick={run}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Retry
-          </button>
+          {sessionId && (
+            <button
+              onClick={async () => {
+                setError(null);
+                setLoading(true);
+                await regradeInterview(sessionId).catch(() => {});
+                run();
+              }}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Re-grade
+            </button>
+          )}
           <Link
-            href="/"
+            href="/admin"
             className="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500"
           >
-            Back to setup
+            Back to admin
           </Link>
         </div>
       </div>
@@ -145,7 +167,7 @@ export default function ScorecardPage() {
       <header className="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-4 min-w-0">
-            <Link href="/" className="text-slate-500 hover:text-white shrink-0">
+            <Link href="/admin" className="text-slate-500 hover:text-white shrink-0">
               <ArrowLeft className="w-4 h-4" />
             </Link>
             <div className="min-w-0">
@@ -169,7 +191,7 @@ export default function ScorecardPage() {
             )}
             <span
               className={`px-3 py-1.5 rounded-full text-xs font-bold border ${
-                VERDICT_STYLE[evaluation.verdict] || VERDICT_STYLE.Borderline
+                VERDICT_STYLE[evaluation.verdict] || VERDICT_STYLE["Needs discussion"]
               }`}
             >
               {evaluation.verdict} · {evaluation.overallScore}
@@ -445,5 +467,20 @@ export default function ScorecardPage() {
         </aside>
       </main>
     </div>
+  );
+}
+
+
+export default function ScorecardPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 text-sm">
+          Loading…
+        </div>
+      }
+    >
+      <Scorecard />
+    </Suspense>
   );
 }

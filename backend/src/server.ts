@@ -2,19 +2,17 @@ import express, { Request, Response } from "express";
 import { createServer } from "http";
 import cors from "cors";
 import dotenv from "dotenv";
-import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import { CANDIDATE_RESUME } from "./resumeData";
-import { ScorecardEvaluation } from "./scorecardTypes";
-import { bedrockClient, EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION, extractJson } from "./bedrock";
+import { EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
 import { attachNovaSonicRelay } from "./novaSonic";
+import { generateQuestionBank, loadContextPack, InterviewDuration } from "./questionBank";
 import {
-  generateQuestionBank,
-  loadContextPack,
-  InterviewDuration,
-  QuestionBank,
-} from "./questionBank";
-import { createSession, getSession } from "./sessionStore";
-import { evaluateInterview, evaluateGeneric } from "./evaluate";
+  createSession,
+  getSession,
+  getSessionByEmail,
+  listSessions,
+  updateSession,
+} from "./sessionStore";
+import { gradeSession } from "./grading";
 
 dotenv.config();
 
@@ -86,7 +84,8 @@ app.post("/api/extract-text", async (req: Request, res: Response) => {
 // This is the step that makes the interview role-aware and org-grounded.
 app.post("/api/prepare", async (req: Request, res: Response) => {
   try {
-    const { jdText, resumeText, candidateName, durationMinutes } = req.body || {};
+    const { jdText, resumeText, candidateName, candidateEmail, durationMinutes } =
+      req.body || {};
 
     if (!jdText?.trim() || !resumeText?.trim()) {
       return res.status(400).json({
@@ -95,13 +94,25 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       });
     }
 
-    const duration = ([15, 30, 45] as const).includes(durationMinutes)
+    // Email is the candidate's only lookup key, so it is mandatory.
+    if (!candidateEmail?.trim() || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(candidateEmail.trim())) {
+      return res.status(400).json({
+        error: "MISSING_EMAIL",
+        message: "A valid candidate email is required — it is how they sign in.",
+      });
+    }
+
+    const duration = ([5, 15, 30, 45] as const).includes(durationMinutes)
       ? (durationMinutes as InterviewDuration)
       : 30;
 
     const started = Date.now();
     const bank = await generateQuestionBank({ jdText, resumeText, duration });
-    const session = createSession(candidateName?.trim() || "the candidate", bank);
+    const session = createSession({
+      candidateName: candidateName?.trim() || "the candidate",
+      candidateEmail,
+      bank,
+    });
 
     console.log(
       `[Prepare] ${session.id} — ${bank.role} (${bank.seniority}), ` +
@@ -115,6 +126,7 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       success: true,
       sessionId: session.id,
       candidateName: session.candidateName,
+      candidateEmail: session.candidateEmail,
       bank,
       grounded: loadContextPack() !== null,
     });
@@ -125,6 +137,93 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       message: error?.message || "Could not prepare the interview.",
     });
   }
+});
+
+// 1b-ii. Candidate sign-in. Email only — the interview was prepared in advance,
+// so this is a lookup, not a generation. Returns nothing that reveals what will
+// be asked.
+app.post("/api/candidate/signin", (req: Request, res: Response) => {
+  const session = getSessionByEmail(req.body?.email || "");
+
+  if (!session) {
+    return res.status(404).json({
+      error: "NOT_FOUND",
+      message: "No interview found for that email. Check with your recruiter.",
+    });
+  }
+
+  if (session.status === "completed" || session.status === "terminated") {
+    return res.status(409).json({
+      error: "ALREADY_DONE",
+      message: "This interview has already been completed.",
+    });
+  }
+
+  return res.json({
+    success: true,
+    sessionId: session.id,
+    candidateName: session.candidateName,
+    role: session.bank.role,
+    durationMinutes: session.bank.durationMinutes,
+    questionCount: session.bank.questions.length,
+  });
+});
+
+// 1b-iii. Admin list of every prepared interview and its outcome.
+app.get("/api/admin/sessions", (_req: Request, res: Response) => {
+  return res.json({
+    sessions: listSessions().map((s) => ({
+      id: s.id,
+      candidateName: s.candidateName,
+      candidateEmail: s.candidateEmail,
+      role: s.role,
+      seniority: s.bank.seniority,
+      durationMinutes: s.bank.durationMinutes,
+      questionCount: s.bank.questions.length,
+      status: s.status,
+      createdAt: s.createdAt,
+      terminationReason: s.terminationReason,
+      verdict: s.scorecard?.verdict,
+      overallScore: s.scorecard?.overallScore,
+      transcriptCount: s.transcripts.length,
+      gradingError: s.gradingError,
+    })),
+  });
+});
+
+// Full detail for one session — the admin view of everything the candidate
+// never sees: the bank, the rubric, and the scorecard once it exists.
+app.get("/api/admin/sessions/:id", (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
+  }
+  return res.json({ session });
+});
+
+// 1b-iv. Interview completion. Proctoring runs in the browser, so the flags and
+// the real elapsed time are posted here. The transcript is NOT taken from the
+// client — the relay already recorded it server-side, which is what makes the
+// result survive a candidate closing the tab.
+app.post("/api/interview/:id/complete", (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
+  }
+
+  const { redFlags = [], durationSeconds = 0, terminationReason } = req.body || {};
+
+  updateSession(session.id, {
+    redFlags: Array.isArray(redFlags) ? redFlags : [],
+    durationSeconds: Number(durationSeconds) || 0,
+    terminationReason,
+  });
+
+  // Fire and forget: the candidate's browser is on its way to a thank-you page
+  // and must not sit waiting on a minute of grading.
+  gradeSession(session.id, terminationReason).catch(() => {});
+
+  return res.json({ success: true });
 });
 
 // 1c. Context pack inspection — powers the "what will be asked, and is it safe"
@@ -150,342 +249,53 @@ app.get("/api/context-pack", (_req: Request, res: Response) => {
   });
 });
 
-// 2. Evaluation Engine: Produces candidate scorecard
-/**
- * Grades against the rubric the session's question bank generated.
- *
- * Falls through to the legacy path below when no sessionId is supplied, so old
- * recordings and the no-prep demo route still produce a scorecard.
- */
-app.post("/api/evaluate", async (req: Request, res: Response) => {
-  try {
-    const { transcripts = [], durationSeconds = 0, redFlags = [], sessionId } = req.body;
+// 2. Scorecard retrieval. Grading happens automatically when the interview ends
+// (see grading.ts), so this only reads the result.
+app.get("/api/scorecard/:id", (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such interview." });
+  }
 
-    const prepared = sessionId ? getSession(sessionId) : undefined;
-
-    if (prepared && transcripts.length > 0) {
-      const evaluation = await evaluateInterview({
-        bank: prepared.bank,
-        candidateName: prepared.candidateName,
-        transcripts,
-        durationSeconds,
-        redFlags,
-        orgGrounded: loadContextPack() !== null,
-      });
-
-      // The counterfactual: same transcript, generic rubric, no org context.
-      // Runs alongside so the two verdicts can be shown side by side.
-      let generic = null;
-      try {
-        generic = await evaluateGeneric({
-          candidateName: prepared.candidateName,
-          role: prepared.bank.role,
-          transcripts,
-        });
-      } catch (err: any) {
-        console.error("[Evaluate] Generic comparison failed:", err?.message);
-      }
-
-      console.log(
-        `[Evaluate] ${prepared.id} — grounded: ${evaluation.verdict} ${evaluation.overallScore}` +
-          (generic ? ` | generic: ${generic.verdict} ${generic.overallScore}` : "")
-      );
-
-      return res.json({ success: true, evaluation, genericComparison: generic });
-    }
-
-    // --- legacy path: no prepared session ---
-
-    const formattedTranscript = transcripts
-      .map(
-        (t: any) =>
-          `[${t.sender === "candidate" ? CANDIDATE_RESUME.name : "Interviewer (Sarah)"}]: ${t.text}`
-      )
-      .join("\n\n");
-
-    const candidateLines = transcripts.filter((t: any) => t.sender === "candidate");
-
-    // Fallback if interview was aborted very early
-    if (transcripts.length === 0 || candidateLines.length === 0) {
-      const fallbackEvaluation: ScorecardEvaluation = {
-        verdict: "Borderline",
-        overallScore: 68,
-        ratings: {
-          technicalCompetence: 3.5,
-          systemDesign: 3.5,
-          communication: 3.0,
-          authenticity: 4.0,
-        },
-        summary:
-          "The interview concluded before an extensive technical dialogue could be recorded. Based on initial greeting and resume verification for Alex Doe, the candidate shows solid senior-level pedigree in distributed systems, but required deeper probing into live Redis cluster partition failovers.",
-        recommendationReason:
-          "Recommend a follow-up 30-minute deep-dive focusing on PostgreSQL lock contention and Redis Lua script latency.",
-        keyStrengths: [
-          {
-            title: "Distributed Scheduling Knowledge",
-            explanation:
-              "Clear theoretical command of Redis Sorted Sets (ZADD/ZREMRANGEBYSCORE) for O(log N) delayed execution over message queues.",
-            evidenceQuote: "Discussed delayed task queues using Redis sorted sets and epoch scoring.",
-          },
-          {
-            title: "Concurrency Primitives",
-            explanation:
-              "Understands PostgreSQL advisory locks for non-blocking worker partition coordination.",
-          },
-        ],
-        redFlags: [
-          {
-            title: "Short Dialogue Sample",
-            explanation:
-              "Interview concluded early. Full live architectural trade-off verification was truncated.",
-          },
-        ],
-        directQuotes: [
-          {
-            competency: "Architecture & Systems Design",
-            quote:
-              "Delayed scheduling with Redis sorted sets avoids Kafka head-of-line blocking for arbitrary delays.",
-            analysis:
-              "Accurate characterization of Kafka partition limitations for arbitrary timestamp scheduling.",
-            impact: "positive",
-          },
-        ],
-        projectAssessments: [
-          {
-            projectName: "High-Throughput Job Scheduler",
-            rating: 4,
-            strengthsObserved: [
-              "Proper application of PostgreSQL transaction advisory locks",
-              "Sub-10ms trigger delay design with Redis O(log N) lookups",
-            ],
-            unresolvedConcerns: ["Worker failure reclamation under uncommitted job crash"],
-          },
-          {
-            projectName: "Distributed Rate Limiter",
-            rating: 3,
-            strengthsObserved: ["Understanding of sliding window log vs token bucket"],
-            unresolvedConcerns: ["Multi-shard Redis cluster cross-slot Lua constraints"],
-          },
-        ],
-        durationSeconds: durationSeconds || 180,
-        evaluatedAt: new Date().toISOString(),
-        evaluationMode: "offline_simulation",
-        modelUsed: "Simulation Mode (No Candidate Transcript Recorded)",
-      };
-
-      return res.json({ success: true, evaluation: fallbackEvaluation });
-    }
-
-    // Evaluate with Claude on Bedrock. Credentials come from the AWS provider
-    // chain, so there is no key to check before attempting the call.
-    {
-      const systemPrompt = `You are a Principal Technical Recruiting Bar Raiser and Lead Architect evaluating a Round-0 interview transcript for a candidate:
-Candidate: ${CANDIDATE_RESUME.name}
-Role: ${CANDIDATE_RESUME.title} (${CANDIDATE_RESUME.experienceYears} Years Experience)
-
-Evaluation Rubric:
-${JSON.stringify(CANDIDATE_RESUME.rubric, null, 2)}
-
-Hardcoded Projects to assess:
-${JSON.stringify(
-  CANDIDATE_RESUME.projects.map((p) => ({
-    name: p.name,
-    keyArchitecture: p.keyArchitecture,
-    failureModes: p.failureModesToExplore,
-  })),
-  null,
-  2
-)}
-
-Strictly output a valid JSON object matching this schema:
-{
-  "verdict": "Strong Hire" | "Hire" | "Borderline" | "Reject",
-  "overallScore": number (0 to 100),
-  "ratings": {
-    "technicalCompetence": number (1.0 to 5.0),
-    "systemDesign": number (1.0 to 5.0),
-    "communication": number (1.0 to 5.0),
-    "authenticity": number (1.0 to 5.0)
-  },
-  "summary": string (comprehensive executive summary for hiring committee),
-  "recommendationReason": string (1-2 sentences rationale for final hiring decision),
-  "keyStrengths": [
-    {
-      "title": string,
-      "explanation": string,
-      "evidenceQuote": string (quote candidate directly if available)
-    }
-  ],
-  "redFlags": [
-    {
-      "title": string,
-      "explanation": string,
-      "evidenceQuote": string (quote candidate directly if available)
-    }
-  ],
-  "directQuotes": [
-    {
-      "competency": string,
-      "quote": string,
-      "analysis": string,
-      "impact": "positive" | "negative" | "neutral"
-    }
-  ],
-  "projectAssessments": [
-    {
-      "projectName": string,
-      "rating": number (1.0 to 5.0),
-      "strengthsObserved": string[],
-      "unresolvedConcerns": string[]
-    }
-  ]
-}
-
-Ensure your evaluation is rigorous, objective, and quotes the candidate directly.
-Respond with the JSON object only — no prose, no markdown fences.`;
-
-      // Proctoring incidents are advisory context for the authenticity rating.
-      // They are integrity signals, not evidence about technical ability, so the
-      // model is told not to let them drive the technical scores.
-      const proctoringContext = redFlags.length
-        ? `\n\nProctoring incidents recorded during this session (integrity signal only — ` +
-          `factor these into the "authenticity" rating and mention them in redFlags where ` +
-          `warranted, but do NOT let them lower the technical or system-design scores):\n` +
-          redFlags
-            .map((f: any) => `- [${f.type}] at ${f.timeInSeconds}s: ${f.description}`)
-            .join("\n")
-        : "";
-
-      try {
-        const command = new ConverseCommand({
-          modelId: EVALUATION_MODEL_ID,
-          system: [{ text: systemPrompt }],
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  text: `Here is the full recorded transcript of the interview session:\n\n${formattedTranscript}${proctoringContext}`,
-                },
-              ],
-            },
-          ],
-          inferenceConfig: { maxTokens: 4096, temperature: 0.3 },
-        });
-
-        const aiData = await bedrockClient.send(command);
-        const content = aiData.output?.message?.content?.[0]?.text;
-
-        if (!content) {
-          throw new Error("Bedrock returned an empty evaluation response.");
-        }
-
-        const parsedEvaluation: ScorecardEvaluation = extractJson(content);
-        parsedEvaluation.durationSeconds = durationSeconds;
-        parsedEvaluation.evaluatedAt = new Date().toISOString();
-        parsedEvaluation.evaluationMode = "realtime_llm";
-        parsedEvaluation.modelUsed = `${EVALUATION_MODEL_ID} (Amazon Bedrock, ${AWS_REGION})`;
-
-        return res.json({
-          success: true,
-          evaluation: parsedEvaluation,
-        });
-      } catch (bedrockError: any) {
-        // Expired workshop credentials are the most likely cause here. Rather
-        // than 500 mid-demo, drop through to the deterministic rubric matcher.
-        console.error(
-          "[Evaluate] Bedrock call failed, falling back to deterministic matcher:",
-          bedrockError?.name,
-          bedrockError?.message
-        );
-      }
-    }
-
-    // Deterministic Fallback if Bedrock is unreachable
-    const fullText = transcripts.map((t: any) => t.text).join(" ").toLowerCase();
-    const mentionsRedis = fullText.includes("redis");
-    const mentionsPostgres = fullText.includes("postgres") || fullText.includes("advisory") || fullText.includes("lock");
-    const mentionsKafka = fullText.includes("kafka");
-    const mentionsRateLimit = fullText.includes("rate") || fullText.includes("token") || fullText.includes("sliding");
-
-    let score = 75;
-    if (mentionsRedis) score += 6;
-    if (mentionsPostgres) score += 6;
-    if (mentionsKafka) score += 5;
-    if (mentionsRateLimit) score += 5;
-    score = Math.min(94, score);
-
-    const verdict = score >= 85 ? "Strong Hire" : score >= 75 ? "Hire" : "Borderline";
-
-    const deterministicEvaluation: ScorecardEvaluation = {
-      verdict,
-      overallScore: score,
-      ratings: {
-        technicalCompetence: (score / 20).toFixed(1) as unknown as number,
-        systemDesign: ((score - 2) / 20).toFixed(1) as unknown as number,
-        communication: 4.2,
-        authenticity: 4.5,
-      },
-      summary: `Alex Doe demonstrated strong technical depth during the Round-0 evaluation. The candidate articulated the architectural merits of combining Redis sorted sets for delayed task scheduling with PostgreSQL advisory locks for distributed worker leasing, successfully handling race conditions.`,
-      recommendationReason: `Strong recommendation to proceed to onsite System Design round. Technical foundations and distributed systems instincts are rock solid.`,
-      keyStrengths: [
-        {
-          title: "Precision in Distributed Coordination",
-          explanation:
-            "Distinguished between session-level and transaction-level advisory locks in PostgreSQL, demonstrating practical production debugging experience.",
-          evidenceQuote:
-            candidateLines[0]?.text || "Addressed distributed worker coordination and concurrency locks.",
-        },
-        {
-          title: "Architectural Pragmatism",
-          explanation:
-            "Clearly articulated why message brokers like Kafka are suboptimal for arbitrary delayed scheduling due to head-of-line blocking.",
-        },
-      ],
-      redFlags: [
-        {
-          title: "Cluster Partition Edge Cases",
-          explanation:
-            "Would benefit from a deeper dive into network partition split-brain behavior on Redis Cluster with master failovers.",
-        },
-      ],
-      directQuotes: candidateLines.slice(0, 3).map((line: any) => ({
-        competency: "Technical Knowledge",
-        quote: line.text,
-        analysis: "Direct response reflecting hands-on implementation experience.",
-        impact: "positive" as const,
-      })),
-      projectAssessments: [
-        {
-          projectName: "High-Throughput Job Scheduler",
-          rating: 4.5,
-          strengthsObserved: [
-            "O(log N) delayed execution queue design",
-            "PostgreSQL advisory locking preventing duplicate worker executions",
-          ],
-          unresolvedConcerns: ["Reclaim strategy on sudden node SIGKILL before ACK"],
-        },
-        {
-          projectName: "Distributed Rate Limiter",
-          rating: 4.0,
-          strengthsObserved: ["Multi-tenant sliding window log and token bucket failover"],
-          unresolvedConcerns: ["Cross-slot Lua script execution limits on Redis Cluster"],
-        },
-      ],
-      durationSeconds: durationSeconds || 240,
-      evaluatedAt: new Date().toISOString(),
-      evaluationMode: "offline_simulation",
-      modelUsed: "Deterministic Rubric Matcher (Bedrock Unreachable)",
-    };
-
-    return res.json({ success: true, evaluation: deterministicEvaluation });
-  } catch (error: any) {
-    console.error("Evaluation Route Error:", error);
-    return res.status(500).json({
-      error: "EVALUATION_FAILED",
-      message: error?.message || "Failed to generate evaluation scorecard.",
+  if (session.scorecard) {
+    return res.json({
+      status: "completed",
+      candidateName: session.candidateName,
+      role: session.role,
+      evaluation: session.scorecard,
+      genericComparison: (session.scorecard as any).genericComparison || null,
+      transcripts: session.transcripts,
+      terminationReason: session.terminationReason,
     });
   }
+
+  if (session.gradingError) {
+    return res.status(500).json({
+      status: "failed",
+      message: session.gradingError,
+      transcripts: session.transcripts,
+    });
+  }
+
+  // Still running or still grading — the client polls.
+  return res.json({
+    status: session.status,
+    candidateName: session.candidateName,
+    role: session.role,
+    transcriptCount: session.transcripts.length,
+  });
+});
+
+// Manual re-grade, for a session that ended without one.
+app.post("/api/scorecard/:id/regrade", async (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such interview." });
+  }
+
+  updateSession(session.id, { status: "in_progress", gradingError: undefined });
+  gradeSession(session.id, "manual regrade").catch(() => {});
+  return res.json({ success: true, status: "grading" });
 });
 
 const httpServer = createServer(app);

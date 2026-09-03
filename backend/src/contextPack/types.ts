@@ -62,6 +62,12 @@ export interface StackProfile {
 export interface ContextPack {
   version: string;
   generatedAt: string;
+  /**
+   * Public-safe company context from company-profile.md — mission, values, how
+   * the team works. Hand-maintained and always available, so the system produces
+   * culture and environment signal even with no Confluence or Slack connected.
+   */
+  companyProfile: string;
   stackProfile: StackProfile;
   scenarios: Scenario[];
   /** Provenance for auditing — doc titles only, never bodies or URLs. */

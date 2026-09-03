@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
+import { FaceDetector, ObjectDetector, FilesetResolver } from "@mediapipe/tasks-vision";
 import { RedFlag, RedFlagType, recordFlag } from "@/lib/sessionStore";
 
 /**
@@ -15,9 +15,14 @@ import { RedFlag, RedFlagType, recordFlag } from "@/lib/sessionStore";
  *   CANDIDATE_ABSENT         - nobody in frame for >3s
  *   TAB_SWITCH_DETECTED      - window blur / visibility change
  *
- * Phone detection from the original spec is deliberately not implemented — object
- * detection for handheld devices false-positives on mugs, notebooks and hands,
- * and a proctoring tool that cries wolf is worse than one that stays quiet.
+ *   PHONE_DETECTED           - a handheld device is visible
+ *
+ * Phone detection is the one that needs care. Object detection false-positives
+ * readily on mugs, notebooks and hands, so a single frame is never enough: the
+ * device must be seen continuously for over two seconds before it flags at all.
+ * That is also why only sustained multi-person and sustained phone detections
+ * are allowed to escalate toward ending a call — a proctoring tool that cries
+ * wolf is worse than one that stays quiet.
  *
  * Every flag captures a JPEG snapshot as evidence. Detection runs at a throttled
  * rate rather than every frame so it doesn't compete with the audio pipeline.
@@ -26,6 +31,15 @@ import { RedFlag, RedFlagType, recordFlag } from "@/lib/sessionStore";
 const DETECTION_INTERVAL_MS = 300; // ~3fps is plenty for presence checks
 const ABSENCE_THRESHOLD_MS = 3000;
 const COOLDOWN_MS = 8000; // per flag type, prevents duplicate spam
+
+/** A phone must be visible continuously for this long before it counts. */
+const PHONE_SUSTAIN_MS = 2000;
+/** Likewise for a second face — people walk past doorways. */
+const MULTI_FACE_SUSTAIN_MS = 1500;
+/** Object-detector confidence floor. Deliberately high. */
+const PHONE_CONFIDENCE = 0.55;
+/** COCO classes that count as a handheld device. */
+const PHONE_LABELS = ["cell phone", "mobile phone", "remote"];
 
 export interface UseProctoringOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -41,6 +55,8 @@ export interface UseProctoringReturn {
   faceCount: number;
   isReady: boolean;
   error: string | null;
+  /** True while a device is currently visible — drives the live indicator. */
+  phoneVisible: boolean;
 }
 
 export function useProctoring({
@@ -53,8 +69,12 @@ export function useProctoring({
   const [faceCount, setFaceCount] = useState(0);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [phoneVisible, setPhoneVisible] = useState(false);
 
   const detectorRef = useRef<FaceDetector | null>(null);
+  const objectDetectorRef = useRef<ObjectDetector | null>(null);
+  const phoneSinceRef = useRef<number | null>(null);
+  const multiFaceSinceRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastDetectionRef = useRef(0);
@@ -161,6 +181,23 @@ export function useProctoring({
         }
 
         detectorRef.current = detector;
+
+        // Object detection is best-effort: if the model fails to load the
+        // interview still runs with face-based proctoring rather than dying.
+        try {
+          objectDetectorRef.current = await ObjectDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: "/models/efficientdet_lite0.tflite",
+              delegate: "GPU",
+            },
+            runningMode: "VIDEO",
+            scoreThreshold: PHONE_CONFIDENCE,
+            maxResults: 5,
+          });
+        } catch (err) {
+          console.warn("[Proctoring] Object detector unavailable, continuing without it:", err);
+        }
+
         setIsReady(true);
         loop();
       } catch (err: any) {
@@ -192,10 +229,47 @@ export function useProctoring({
 
       setFaceCount(count);
 
+      // --- handheld device, sustained ---
+      const objectDetector = objectDetectorRef.current;
+      if (objectDetector) {
+        try {
+          const objects = objectDetector.detectForVideo(video, now);
+          const seesPhone = (objects.detections || []).some((d) =>
+            (d.categories || []).some(
+              (c) =>
+                PHONE_LABELS.includes((c.categoryName || "").toLowerCase()) &&
+                (c.score ?? 0) >= PHONE_CONFIDENCE
+            )
+          );
+
+          setPhoneVisible(seesPhone);
+
+          if (seesPhone) {
+            if (phoneSinceRef.current === null) {
+              phoneSinceRef.current = now;
+            } else if (now - phoneSinceRef.current > PHONE_SUSTAIN_MS) {
+              raiseFlag("PHONE_DETECTED", "Phone or handheld device visible in frame");
+              phoneSinceRef.current = now; // cooldown handles spacing
+            }
+          } else {
+            phoneSinceRef.current = null;
+          }
+        } catch {
+          /* transient decode error — ignore this frame */
+        }
+      }
+
       if (count > 1) {
         absentSinceRef.current = null;
-        raiseFlag("MULTIPLE_FACES_DETECTED", "Another person detected in camera frame");
+        // Sustained, so someone crossing behind the candidate does not flag.
+        if (multiFaceSinceRef.current === null) {
+          multiFaceSinceRef.current = now;
+        } else if (now - multiFaceSinceRef.current > MULTI_FACE_SUSTAIN_MS) {
+          raiseFlag("MULTIPLE_FACES_DETECTED", "Another person detected in camera frame");
+          multiFaceSinceRef.current = now;
+        }
       } else if (count === 0) {
+        multiFaceSinceRef.current = null;
         // Debounced: a brief turn away shouldn't trip the flag.
         if (absentSinceRef.current === null) {
           absentSinceRef.current = now;
@@ -205,6 +279,7 @@ export function useProctoring({
         }
       } else {
         absentSinceRef.current = null;
+        multiFaceSinceRef.current = null;
       }
     };
 
@@ -216,9 +291,12 @@ export function useProctoring({
       rafRef.current = null;
       detectorRef.current?.close();
       detectorRef.current = null;
+      objectDetectorRef.current?.close();
+      objectDetectorRef.current = null;
       setIsReady(false);
+      setPhoneVisible(false);
     };
   }, [enabled, videoRef, raiseFlag]);
 
-  return { flags, faceCount, isReady, error };
+  return { flags, faceCount, isReady, error, phoneVisible };
 }

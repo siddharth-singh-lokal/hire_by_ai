@@ -1,4 +1,12 @@
-export type VerdictType = "Strong Hire" | "Hire" | "Borderline" | "Reject";
+/**
+ * Advancement language, not hiring language. The AI never decides a hire — it
+ * says what should happen next and a human makes the call.
+ */
+export type VerdictType =
+  | "Advance"
+  | "Advance with focus"
+  | "Needs discussion"
+  | "Do not advance";
 
 export interface ScorecardEvaluation {
   verdict: VerdictType;

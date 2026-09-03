@@ -22,7 +22,7 @@ import { ContextPack } from "./contextPack/types";
 
 const PACK_PATH = path.join(__dirname, "contextPack", "context-pack.json");
 
-export type InterviewDuration = 15 | 30 | 45;
+export type InterviewDuration = 5 | 15 | 30 | 45;
 
 /** Fixed axes keep candidates comparable; generated axes keep the role honest. */
 export const FIXED_RUBRIC_AXES = [
@@ -80,6 +80,8 @@ export interface QuestionBank {
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
 const DURATION_PLAN: Record<InterviewDuration, { projects: number; scenarios: number; gaps: number }> = {
+  // 5 is a demo/taster length: one claim to verify, one problem to reason about.
+  5: { projects: 1, scenarios: 1, gaps: 0 },
   15: { projects: 1, scenarios: 1, gaps: 1 },
   30: { projects: 2, scenarios: 2, gaps: 1 },
   45: { projects: 2, scenarios: 3, gaps: 2 },
@@ -107,6 +109,7 @@ function buildSystemPrompt(pack: ContextPack | null, plan: { projects: number; s
   const packSection = pack
     ? `
 ORG CONTEXT — the environment this role works in.
+${pack.companyProfile ? `\nCOMPANY PROFILE (public-safe; use for tone and for judging whether someone's way of working would translate here — never quiz them on it):\n${pack.companyProfile}\n` : ""}
 Technical profile:
 ${JSON.stringify(pack.stackProfile, null, 2)}
 
@@ -137,11 +140,22 @@ USING THE SCENARIOS
 NO ORG CONTEXT AVAILABLE. Generate scenario questions from the technologies named in the JD instead. Keep them concrete and situational rather than trivia.
 `;
 
-  return `You are a principal engineer designing a structured Round-0 screening interview.
+  return `You are a thoughtful engineer designing a Round-0 SCREENING conversation.
 
-This interview happens BEFORE a human technical round. Its purpose is not to make a hire/no-hire decision — it is to produce evidence that lets a hiring manager decide whether spending an engineer's hour on this candidate is worthwhile.
+WHAT THIS IS, AND WHAT IT IS NOT
+This is the first conversation a candidate has, replacing a non-technical phone screen. Later rounds do the deep technical assessment. Your job is narrow:
 
-You are given a job description, a candidate resume, and context about the engineering environment. Design the interview.
+  Does this person actually know what their resume claims?
+  Are they worth an engineer's hour in the next round?
+
+That is the whole bar. You are NOT deciding whether to hire them, and you are NOT running a senior-level technical gauntlet. A screening round that feels like an interrogation makes good candidates withdraw, and losing good candidates is a far more expensive failure than advancing a mediocre one — the next round catches those anyway.
+
+CALIBRATE ACCORDINGLY
+- Questions should be answerable by someone who genuinely did the work on their resume, and hard to answer convincingly by someone who did not. That contrast is the entire signal.
+- Ask about what they claim, not about everything the role could conceivably touch.
+- Do NOT design questions whose purpose is to find the edge of someone's knowledge. Finding the edge is the next round's job.
+- A missing skill is not a failure. People learn on the job. Only test what the role genuinely requires from day one.
+- Keep the tone warm and collegial. This is a conversation between engineers, not an examination.
 ${packSection}
 
 DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.scenarios} scenario question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
@@ -153,7 +167,9 @@ Then add 1-2 axes generated from THIS job description specifically (for example 
 
 CALIBRATE THE BAR TO THE JD. A 4/5 for an intern and a 4/5 for a staff engineer are completely different standards. Write strongSignal and weakSignal for the seniority this JD is actually hiring at. Read the JD carefully: a leadership role may barely mention coding, and testing it on algorithms would be a failure of the interview, not of the candidate.
 
-CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort with ambiguity, context-switching, mentoring, giving hard feedback — turn that into an assessable axis. Do not invent culture criteria that the JD does not state.
+WRITE SIGNALS THAT A SCREEN CAN ACTUALLY OBSERVE. strongSignal must describe something demonstrable in a short conversation — "can explain a tradeoff they rejected and why" — not something that needs a work sample or a reference check. If an axis cannot be observed in ${duration} minutes, do not include it.
+
+CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort with ambiguity, context-switching, mentoring, giving hard feedback — turn that into an assessable axis. Do not invent culture criteria the JD does not state. Frame these as "how they work", never as personality. Keep at most one such axis: a screening call gives thin evidence about working style, and over-weighting it produces confident nonsense.
 
 QUESTION DESIGN
 - resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot.
@@ -220,7 +236,12 @@ function normaliseAxis(a: any): RubricAxis {
 }
 
 /** Intro plus wrap-up. Real minutes the questions never get. */
-const OVERHEAD_MINUTES = 4;
+const OVERHEAD_MINUTES_BY_DURATION: Record<InterviewDuration, number> = {
+  5: 1,
+  15: 3,
+  30: 4,
+  45: 5,
+};
 
 /**
  * Keeps the interview inside its slot.
@@ -232,22 +253,21 @@ const OVERHEAD_MINUTES = 4;
  * the most valuable question in the set.
  */
 function fitBudget(questions: BankQuestion[], duration: InterviewDuration): BankQuestion[] {
-  const available = duration - OVERHEAD_MINUTES;
+  const available = duration - OVERHEAD_MINUTES_BY_DURATION[duration];
   const requested = questions.reduce((sum, q) => sum + (q.minutes || 0), 0);
   if (requested <= available || requested === 0) return questions;
 
   const scale = available / requested;
   console.warn(
     `[questionBank] Trimming ${requested} min of questions to fit ${available} min ` +
-      `(${duration} min interview minus ${OVERHEAD_MINUTES} min overhead).`
+      `(${duration} min interview minus ${OVERHEAD_MINUTES_BY_DURATION[duration]} min overhead).`
   );
 
   return questions.map((q) => ({
     ...q,
-    // Never scale a question below 3 minutes — anything shorter cannot be
-    // asked and answered, and a question you can't answer is worse than one
-    // you didn't ask.
-    minutes: Math.max(3, Math.round((q.minutes || 0) * scale)),
+    // Never scale below 2 minutes — anything shorter cannot be asked and
+    // answered, and a question you can't answer is worse than one you didn't ask.
+    minutes: Math.max(2, Math.round((q.minutes || 0) * scale)),
   }));
 }
 
@@ -304,15 +324,23 @@ export async function generateQuestionBank(opts: {
  * Slack or Confluence — it cannot leak what it was never given.
  */
 export function renderInterviewerPrompt(bank: QuestionBank, candidateName = "the candidate"): string {
+  // The live agent gets ONLY what it needs to hold the conversation: the
+  // question, how to go deeper, and how to back off.
+  //
+  // It deliberately does NOT receive intent, strongAnswer or weakAnswer. In
+  // testing, the agent read those aloud — it told a candidate "someone who did
+  // the work would mention why ClickHouse over TimescaleDB", which is handing
+  // over the answer key. The grader reads those fields straight off the bank
+  // afterwards, so nothing is lost by withholding them here. Same principle as
+  // the Slack connection: it cannot leak what it was never given.
   const questionBlock = bank.questions
     .map(
       (q, i) => `
-${i + 1}. [${q.kind}, ~${q.minutes} min] ${q.question}
-   Looking for: ${q.intent}
-   If the answer is strong, escalate: ${q.escalations.join(" / ") || "(none)"}
-   ${q.fallback ? `If they are struggling, try: ${q.fallback}` : ""}
-   Strong answers mention: ${q.strongAnswer.join("; ")}
-   Weak answers sound like: ${q.weakAnswer.join("; ")}`
+${i + 1}. [~${q.minutes} min] ${q.question}${
+        q.escalations.length
+          ? `\n   If they answer this well, follow up with: ${q.escalations.join(" / ")}`
+          : ""
+      }${q.fallback ? `\n   If they are struggling, try instead: ${q.fallback}` : ""}`
     )
     .join("\n");
 
@@ -323,7 +351,7 @@ The candidate's name is ${candidateName}. Greet them by name and use it naturall
 HOW TO OPEN
 ${bank.openingLine}
 
-YOUR QUESTIONS — work through these in order:
+YOUR QUESTIONS — work through these in order. Ask them as written, in your own voice. Everything in this list is for you alone; never read the bracketed timings or the follow-up notes aloud, and never tell the candidate what you are hoping to hear.
 ${questionBlock}
 
 HOW TO CONDUCT THIS
@@ -336,7 +364,7 @@ KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or thr
 - Adapt. If an answer is strong, use the escalation and go deeper. If they are floundering, use the fallback or move on — grinding someone down produces no signal and is unpleasant.
 - Probe vague answers once: "can you be more specific about how you did that?" Accept the second answer and move on.
 - Stay conversational. This is a discussion between engineers, not an interrogation. Brief acknowledgements are fine; long monologues are not.
-- Never reveal the rubric, the scoring, or what you were looking for.
+- NEVER state what you are assessing, what a good answer contains, or what you were hoping they would say — not before, during, or after a question. If they ask how they did, say the team will follow up.
 - If the candidate asks about internal systems, company specifics, or anything you were not given, say you cannot go into detail and return to the question. You genuinely do not have that information.
 - Close by thanking them and telling them the team will follow up.
 

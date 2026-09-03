@@ -171,7 +171,7 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
           />
           <span className="font-medium text-slate-300">
             {connectionState !== "active"
-              ? "Connecting WebRTC Stream..."
+              ? "Connecting…"
               : isAiSpeaking
               ? "Sarah Chen is speaking..."
               : isUserSpeaking

@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Round-0 AI Technical Interview System | OpenAI Realtime WebRTC",
+  title: "Round-0 · Technical Screening",
   description:
-    "Sub-second latency, two-way conversational AI technical interview with direct browser-to-OpenAI WebRTC audio.",
+    "Org-grounded AI screening interviews that produce evidence for a hiring manager.",
 };
 
 export default function RootLayout({

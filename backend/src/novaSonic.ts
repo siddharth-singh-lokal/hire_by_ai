@@ -4,7 +4,8 @@ import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { bedrockClient, SONIC_MODEL_ID } from "./bedrock";
 import { generateInterviewerSystemPrompt } from "./resumeData";
-import { getSession } from "./sessionStore";
+import { getSession, updateSession, appendTranscript } from "./sessionStore";
+import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
 
 /**
@@ -84,6 +85,73 @@ interface SonicSession {
   closed: boolean;
 }
 
+/**
+ * Injects an out-of-band instruction into a live Sonic conversation.
+ *
+ * Used to tell the interviewer something the candidate did not say — a
+ * proctoring violation, or that the session is ending.
+ *
+ * The note goes in as a USER turn, not a SYSTEM one: Sonic permits exactly one
+ * SYSTEM content block per prompt and rejects a second with "Duplicate SYSTEM
+ * content". Nothing leaks into the transcript as a result, because transcripts
+ * are built from textOutput events and this is an input.
+ */
+function injectSystemNote(session: SonicSession, note: string): void {
+  const contentName = randomUUID();
+
+  session.queue.push({
+    event: {
+      contentStart: {
+        promptName: session.promptName,
+        contentName,
+        type: "TEXT",
+        role: "USER",
+        interactive: true,
+        textInputConfiguration: { mediaType: "text/plain" },
+      },
+    },
+  });
+  session.queue.push({
+    event: { textInput: { promptName: session.promptName, contentName, content: note } },
+  });
+  session.queue.push({
+    event: { contentEnd: { promptName: session.promptName, contentName } },
+  });
+}
+
+/** Closes the Bedrock stream cleanly so Sonic flushes its final audio. */
+function closeSonicStream(session: SonicSession): void {
+  session.queue.push({
+    event: {
+      contentEnd: {
+        promptName: session.promptName,
+        contentName: session.audioContentName,
+      },
+    },
+  });
+  session.queue.push({ event: { promptEnd: { promptName: session.promptName } } });
+  session.queue.push({ event: { sessionEnd: {} } });
+}
+
+/**
+ * Phrases that mean "I want to stop", checked against the candidate's own
+ * transcript. Deliberately narrow: "end" or "stop" alone appear constantly in
+ * normal technical conversation ("stop the workers", "end of the queue"), so
+ * only unambiguous first-person requests count.
+ */
+const END_INTENT = [
+  /\b(?:i|we)(?:'?d| would)? (?:want|like) to (?:end|stop|finish|leave|quit)\b/i,
+  /\b(?:can|could) (?:we|you) (?:please )?(?:end|stop|finish|wrap up)\b/i,
+  /\bi(?:'?m| am) done\b/i,
+  /\bend the (?:interview|call|session)\b/i,
+  /\bstop the (?:interview|call|session)\b/i,
+  /\bi(?:'?d| would)? (?:rather|prefer to) not continue\b/i,
+];
+
+function detectsEndIntent(text: string): boolean {
+  return END_INTENT.some((re) => re.test(text));
+}
+
 export function attachNovaSonicRelay(server: Server): void {
   const wss = new WebSocketServer({ server, path: "/ws/interview" });
 
@@ -97,6 +165,10 @@ export function attachNovaSonicRelay(server: Server): void {
     const instructions = prepared
       ? renderInterviewerPrompt(prepared.bank, prepared.candidateName)
       : generateInterviewerSystemPrompt();
+
+    if (prepared && prepared.status === "ready") {
+      updateSession(prepared.id, { status: "in_progress", startedAt: Date.now() });
+    }
 
     console.log(
       prepared
@@ -151,20 +223,40 @@ export function attachNovaSonicRelay(server: Server): void {
           break;
         }
 
+        // Proctoring escalation. The frontend detects the violation; the relay
+        // injects a note so Sarah raises it herself, in her own voice, mid
+        // conversation. A banner the candidate can ignore is not a warning.
+        case "proctor_warning": {
+          if (!session.ready || session.closed) return;
+
+          const note =
+            msg.strike === 2
+              ? `SYSTEM NOTE — do not read this aloud verbatim. This is a SECOND warning. ${msg.description}. Tell the candidate firmly that this is the final warning and the interview will end if it continues. Two sentences, then return to the question.`
+              : `SYSTEM NOTE — do not read this aloud verbatim. ${msg.description}. Politely ask the candidate to correct this so the session stays valid. Stay calm and non-accusatory — it may be innocent. Two sentences, then return to the question.`;
+
+          injectSystemNote(session, note);
+          break;
+        }
+
+        // The candidate asked to stop, or escalation ran out of strikes.
+        case "terminate": {
+          if (session.closed) return;
+          injectSystemNote(
+            session,
+            `SYSTEM NOTE — do not read this aloud verbatim. The interview is ending now (${msg.reason || "requested"}). Thank the candidate warmly in one or two sentences and tell them the team will follow up. Do not explain the reason and do not ask further questions.`
+          );
+          // Give her a moment to say goodbye before tearing the stream down.
+          setTimeout(() => {
+            if (session.closed) return;
+            closeSonicStream(session);
+            teardown(`terminated: ${msg.reason || "requested"}`);
+          }, 8000);
+          break;
+        }
+
         case "stop": {
           if (session.closed) return;
-          session.queue.push({
-            event: {
-              contentEnd: {
-                promptName: session.promptName,
-                contentName: session.audioContentName,
-              },
-            },
-          });
-          session.queue.push({
-            event: { promptEnd: { promptName: session.promptName } },
-          });
-          session.queue.push({ event: { sessionEnd: {} } });
+          closeSonicStream(session);
           teardown("client requested stop");
           break;
         }
@@ -271,7 +363,12 @@ export function attachNovaSonicRelay(server: Server): void {
     // generationStage marker proved fragile (some blocks arrive with no stage at
     // all, and filtering on it silently dropped every interviewer line). Content
     // equality is the robust check: emit each distinct line once per speaker.
-    const lastEmitted: Record<string, string> = {};
+    // A ring of recently-emitted lines per speaker rather than just the last
+    // one. Sonic can re-emit a whole multi-line block (A,B,C then A,B,C again),
+    // which a single-value comparison lets straight through — the candidate
+    // then hears the same warning twice.
+    const recentlyEmitted: Record<string, string[]> = { candidate: [], interviewer: [] };
+    const DEDUPE_WINDOW = 12;
 
     (async () => {
       try {
@@ -305,9 +402,27 @@ export function attachNovaSonicRelay(server: Server): void {
             const sender = role === "USER" ? "candidate" : "interviewer";
             const text = String(content || "").trim();
 
-            if (text && lastEmitted[sender] !== text) {
-              lastEmitted[sender] = text;
+            // Sonic occasionally emits control payloads (e.g. {"interrupted":true})
+            // through the same channel as speech. Those are not dialogue.
+            const isControlPayload = /^\s*[{[]/.test(text) && /"\w+"\s*:/.test(text);
+
+            const seen = recentlyEmitted[sender];
+            if (text && !isControlPayload && !seen.includes(text)) {
+              seen.push(text);
+              if (seen.length > DEDUPE_WINDOW) seen.shift();
               send({ type: "transcript", sender, text });
+
+              // Persist server-side so the result survives the browser closing.
+              if (prepared) {
+                appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
+              }
+
+              // If the candidate asks to stop, there is no signal left to
+              // gather — respect it rather than pressing on.
+              if (sender === "candidate" && detectsEndIntent(text)) {
+                console.log(`[Sonic] Candidate requested to end: "${text}"`);
+                send({ type: "end_requested" });
+              }
             }
           } else if (event.contentStart?.type === "AUDIO") {
             send({ type: "speech_start" });
@@ -337,6 +452,19 @@ export function attachNovaSonicRelay(server: Server): void {
       } finally {
         teardown("bedrock stream ended");
         if (ws.readyState === WebSocket.OPEN) ws.close();
+
+        // Grade unprompted. The browser may already be gone — a candidate who
+        // closes the tab must still produce a result for the hiring manager.
+        // Delayed slightly so a /complete call carrying proctoring flags can
+        // land first; gradeSession is idempotent either way.
+        if (prepared) {
+          const id = prepared.id;
+          setTimeout(() => {
+            gradeSession(id, "interview ended").catch((e) =>
+              console.error("[Sonic] Auto-grade failed:", e?.message)
+            );
+          }, 3000);
+        }
       }
     })();
   });

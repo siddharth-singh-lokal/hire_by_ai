@@ -30,9 +30,22 @@ interface EvaluateInput {
 function buildPrompt(input: EvaluateInput): string {
   const { bank, redFlags } = input;
 
-  return `You are a hiring bar-raiser grading a Round-0 screening interview.
+  return `You are summarising a Round-0 SCREENING conversation for a hiring manager.
 
-Your output is NOT a decision. It is evidence a hiring manager uses to decide whether to spend a senior engineer's hour on this candidate. Never recommend rejecting or hiring outright — describe what was demonstrated and what remains unknown.
+WHAT YOU ARE ACTUALLY ANSWERING
+Exactly one question: is this person worth a senior engineer's hour in the next round?
+
+You are NOT deciding whether to hire them. You are NOT assessing whether they meet the full bar for the role — later rounds do that with far more evidence than a ${bank.durationMinutes} minute conversation can provide. Overstating what a short screen establishes is the most common way this output misleads people.
+
+HOW TO SCORE — read this carefully, it is where graders go wrong
+- **Absence of evidence is NOT negative evidence.** If a topic never came up, or came up only glancingly, that axis is "not established" — score it 3 (neutral) and say so in the justification. Do NOT score 1 or 2 because something went uncovered. A ${bank.durationMinutes} minute call cannot cover everything, and marking someone down for the interview's own gaps is a grading error, not a finding.
+- **Only score low when there is POSITIVE evidence of a problem** — a claim they could not back up, reasoning that was actually wrong, a requirement they were asked about directly and could not speak to.
+- **A skill they did not list but clearly have is a PLUS.** Resumes undersell constantly. Credit demonstrated ability regardless of whether it was claimed.
+- **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
+- **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
+
+THE SIGNAL THAT MATTERS MOST
+The single most valuable thing you can detect is a MISMATCH between what the resume claims and what the person can actually discuss. Someone who did the work can explain a decision they rejected and why. Someone narrating a README cannot. Weight that heavily. Everything else is secondary.
 
 ROLE: ${bank.role} (${bank.seniority} level), ${bank.durationMinutes} minute screen.
 
@@ -68,18 +81,27 @@ ${redFlags.map((f) => `- [${f.type}] at ${f.timeInSeconds}s: ${f.description}`).
 }
 
 RULES
-- Every axis score needs at least one VERBATIM quote from the candidate. If you cannot quote them, the score must be low-confidence and you must say the topic went uncovered.
-- Never invent quotes. If the transcript is thin, say so plainly — "insufficient evidence" is a legitimate and useful finding.
+- Any axis you score ABOVE OR BELOW 3 needs at least one VERBATIM quote from the candidate. If you cannot quote them, the honest score is 3 and the justification says the topic was not established.
+- Never invent quotes. If the transcript is thin, say so plainly — "not established in this screen" is a legitimate and useful finding, and far more useful than a confident score with nothing behind it.
 - evidenceMoments: pick the 3-6 moments that would most change a hiring manager's mind, positive or negative. Use the timestamp in seconds from the transcript.
 - gapMatrix: one row per JD requirement, stating what the interview actually established.
 - r1Briefing.skip: only topics genuinely nailed. Getting this wrong wastes the engineer's hour, which is the entire thing we are trying to save.
 - r1Briefing.probe: weak, dodged, or uncovered — with a concrete question R1 should ask.
 
+ADVANCEMENT LANGUAGE, NOT HIRING LANGUAGE. The recommendation describes what to do next, and a human makes the call:
+  "Advance"            - clearly worth the next round
+  "Advance with focus" - worth it, but R1 should concentrate on specific gaps
+  "Needs discussion"   - genuinely unclear; the hiring manager should look at the evidence
+  "Do not advance"     - positive evidence of a mismatch, not merely thin coverage
+
+Reserve "Do not advance" for real mismatches: claims they could not support, or a requirement they were directly asked about and clearly could not meet. A quiet or nervous candidate who still reasoned soundly is NOT a "do not advance".
+
 Return ONLY a JSON object:
 {
-  "verdict": "Strong Hire" | "Hire" | "Borderline" | "Reject",
+  "verdict": "Advance" | "Advance with focus" | "Needs discussion" | "Do not advance",
   "overallScore": 0-100,
   "ratings": { "technicalCompetence": 1-5, "systemDesign": 1-5, "communication": 1-5, "authenticity": 1-5 },
+  // ^ legacy summary ratings. Use 3 for anything the conversation did not establish.
   "axisScores": [{ "axis", "score": 1-5, "justification", "evidence": ["verbatim quote"] }],
   "summary": "what this interview established, for a hiring manager",
   "recommendationReason": "1-2 sentences on what to do next and why",
@@ -96,7 +118,7 @@ Return ONLY a JSON object:
   "projectAssessments": [{ "projectName", "rating": 1-5, "strengthsObserved": [], "unresolvedConcerns": [] }]
 }
 
-"verdict" means "how strong is the case for advancing", not a hiring decision.`;
+"overallScore" is confidence that this candidate is worth the next round — NOT a quality grade and NOT a hire probability. A well-covered, solid screen sits around 70-80. Reserve below 40 for genuine mismatches, not for interviews that simply ran short.`;
 }
 
 export async function evaluateInterview(input: EvaluateInput): Promise<GroundedScorecard> {

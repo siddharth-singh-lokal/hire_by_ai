@@ -17,7 +17,21 @@
 export type RedFlagType =
   | "MULTIPLE_FACES_DETECTED"
   | "CANDIDATE_ABSENT"
-  | "TAB_SWITCH_DETECTED";
+  | "TAB_SWITCH_DETECTED"
+  | "PHONE_DETECTED";
+
+/**
+ * Only these can escalate to a warning and eventually end the call.
+ *
+ * Tab switches and brief absences are logged but never terminate: they are far
+ * too easy to trigger innocently (a notification, glancing at a second monitor),
+ * and ending a real candidate's interview over one would be indefensible. The
+ * two that remain both require sustained detection before they fire at all.
+ */
+export const ESCALATABLE_FLAGS: RedFlagType[] = [
+  "MULTIPLE_FACES_DETECTED",
+  "PHONE_DETECTED",
+];
 
 export interface RedFlag {
   id: string;
@@ -35,6 +49,16 @@ export const RED_FLAG_LABELS: Record<RedFlagType, string> = {
   MULTIPLE_FACES_DETECTED: "Multiple People Detected",
   CANDIDATE_ABSENT: "Candidate Left Frame",
   TAB_SWITCH_DETECTED: "Navigated Away From Tab",
+  PHONE_DETECTED: "Phone In Frame",
+};
+
+/** What the interviewer is told to say when raising this with the candidate. */
+export const RED_FLAG_WARNINGS: Record<RedFlagType, string> = {
+  MULTIPLE_FACES_DETECTED:
+    "Someone else appears to be in the room, visible on camera",
+  CANDIDATE_ABSENT: "The candidate has moved out of camera view",
+  TAB_SWITCH_DETECTED: "The candidate has navigated away from the interview tab",
+  PHONE_DETECTED: "A phone or handheld device is visible in the camera frame",
 };
 
 interface SessionEvidence {

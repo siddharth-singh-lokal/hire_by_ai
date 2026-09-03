@@ -47,6 +47,9 @@ export async function validatePack(pack: ContextPack): Promise<ValidationResult>
   // Serialise everything a candidate could ever be exposed to. The provenance
   // block is excluded deliberately — it holds source titles for auditing and is
   // never sent to the interviewer.
+  // companyProfile is excluded deliberately: it is hand-written, reviewed, and
+  // public-safe by construction (the sort of thing that goes on a careers page).
+  // Running it through a leak scan would flag the company's own name forever.
   const exposed = JSON.stringify(
     { stackProfile: pack.stackProfile, scenarios: pack.scenarios },
     null,

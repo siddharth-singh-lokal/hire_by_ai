@@ -46,6 +46,10 @@ export interface UseNovaSonicInterviewReturn {
   toggleVideo: () => void;
   sendTextMessage: (text: string) => void;
   cancelAiResponse: () => void;
+  /** Sends a control frame to the relay (proctor warnings, termination). */
+  sendControl: (message: Record<string, unknown>) => void;
+  /** Set when Sonic hears the candidate ask to stop. */
+  endRequested: boolean;
 }
 
 const MIC_SAMPLE_RATE = 16000; // what Nova Sonic accepts
@@ -57,6 +61,30 @@ const SPEAKER_SAMPLE_RATE = 24000; // what Nova Sonic emits
  * re-rendered on every audio chunk and the whole UI stuttered.
  */
 const METER_INTERVAL_MS = 50;
+
+/**
+ * A barge-in flush throws away buffered speech, so a spurious one is heard as
+ * the interviewer being cut off mid-word. Sonic's turn detection runs on the
+ * audio we send it, which on speakers includes an echo of the interviewer's own
+ * voice — so it can decide the candidate interrupted when they did not.
+ *
+ * Guard: only honour a flush if the local microphone has been genuinely loud
+ * for a sustained stretch. Real speech sustains; an echo transient does not.
+ */
+const BARGE_IN_LEVEL = 0.06;
+const BARGE_IN_SUSTAIN_MS = 250;
+
+/**
+ * Live audio diagnostics, readable from the console as `__round0Audio`.
+ * The failure only reproduces with a real microphone in a real room, so this is
+ * how a real test session reports which mechanism actually fired.
+ */
+export interface AudioDiagnostics {
+  underruns: number;
+  flushesHonoured: number;
+  flushesIgnored: number;
+  chunksReceived: number;
+}
 
 /** Chunked base64 — a per-byte string concat stalls on larger buffers. */
 function toBase64(bytes: Uint8Array): string {
@@ -98,6 +126,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [aiVolume, setAiVolume] = useState(0);
   const [userVolume, setUserVolume] = useState(0);
+  const [endRequested, setEndRequested] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micContextRef = useRef<AudioContext | null>(null);
@@ -111,6 +140,15 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const userVolumeRef = useRef(0);
   const lastUserMeterRef = useRef(0);
   const lastAiMeterRef = useRef(0);
+
+  /** When the mic first crossed the barge-in threshold in the current burst. */
+  const loudSinceRef = useRef<number | null>(null);
+  const diagnosticsRef = useRef<AudioDiagnostics>({
+    underruns: 0,
+    flushesHonoured: 0,
+    flushesIgnored: 0,
+    chunksReceived: 0,
+  });
 
   const cleanup = useCallback(() => {
     closingRef.current = true;
@@ -163,6 +201,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const startInterview = useCallback(async () => {
     setError(null);
     closingRef.current = false;
+    setEndRequested(false);
     setConnectionState("requesting_permission");
 
     try {
@@ -225,6 +264,11 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             lastAiMeterRef.current = now;
             setAiVolume(peak);
           }
+        } else if (type === "underrun") {
+          // The buffer ran dry mid-speech. If this climbs during a session, the
+          // cause is delivery (network or a blocked main thread), not barge-in.
+          diagnosticsRef.current.underruns = e.data.count;
+          console.warn(`[audio] playback underrun #${e.data.count}`);
         }
       };
 
@@ -252,6 +296,13 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         // Smooth the meter: fast attack, slow release.
         userVolumeRef.current = Math.max(peak, userVolumeRef.current * 0.85);
 
+        // Track sustained loudness for the barge-in guard.
+        if (userVolumeRef.current > BARGE_IN_LEVEL) {
+          if (loudSinceRef.current === null) loudSinceRef.current = Date.now();
+        } else {
+          loudSinceRef.current = null;
+        }
+
         const now = performance.now();
         if (now - lastUserMeterRef.current >= METER_INTERVAL_MS) {
           lastUserMeterRef.current = now;
@@ -269,6 +320,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             break;
 
           case "audio": {
+            diagnosticsRef.current.chunksReceived++;
             const bytes = fromBase64(msg.data);
             playbackNodeRef.current?.port.postMessage(
               { type: "push", pcm: bytes.buffer },
@@ -281,12 +333,32 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             appendTranscript(msg.sender, msg.text);
             break;
 
-          case "interrupted":
-            // Candidate talked over Sarah — drop buffered speech immediately.
-            playbackNodeRef.current?.port.postMessage({ type: "flush" });
-            setIsAiSpeaking(false);
-            setAiVolume(0);
+          case "end_requested":
+            // Sonic heard the candidate ask to stop. The page decides what to
+            // do; the hook only reports it.
+            setEndRequested(true);
             break;
+
+          case "interrupted": {
+            const loudFor = loudSinceRef.current ? Date.now() - loudSinceRef.current : 0;
+
+            if (loudFor >= BARGE_IN_SUSTAIN_MS) {
+              // Genuine interruption — drop buffered speech immediately.
+              diagnosticsRef.current.flushesHonoured++;
+              playbackNodeRef.current?.port.postMessage({ type: "flush" });
+              setIsAiSpeaking(false);
+              setAiVolume(0);
+            } else {
+              // Almost certainly the interviewer's own voice echoing back into
+              // the mic. Flushing here would cut her off mid-word for no reason.
+              diagnosticsRef.current.flushesIgnored++;
+              console.warn(
+                `[audio] ignored spurious barge-in (mic loud for only ${loudFor}ms) — ` +
+                  `total ignored: ${diagnosticsRef.current.flushesIgnored}`
+              );
+            }
+            break;
+          }
 
           case "error":
             setError(msg.message || "The interview stream failed.");
@@ -302,6 +374,12 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       ws.onclose = () => {
         if (!closingRef.current) setConnectionState("disconnected");
       };
+
+      // Exposed for diagnosing audio complaints from a real session:
+      //   > __round0Audio
+      if (typeof window !== "undefined") {
+        (window as any).__round0Audio = diagnosticsRef.current;
+      }
     } catch (err: any) {
       console.error("[NovaSonic] start failed:", err);
       setError(
@@ -351,6 +429,12 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     console.warn("[NovaSonic] Text input is not supported on the speech-to-speech stream.");
   }, []);
 
+  const sendControl = useCallback((message: Record<string, unknown>) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(message));
+    }
+  }, []);
+
   const cancelAiResponse = useCallback(() => {
     playbackNodeRef.current?.port.postMessage({ type: "flush" });
     setIsAiSpeaking(false);
@@ -375,5 +459,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     toggleVideo,
     sendTextMessage,
     cancelAiResponse,
+    sendControl,
+    endRequested,
   };
 }

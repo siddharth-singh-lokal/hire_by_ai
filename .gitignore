@@ -33,3 +33,6 @@ yarn-error.log*
 
 # Raw internal docs pulled for Context Pack building — never commit
 backend/src/contextPack/raw/
+
+# Prepared interviews: candidate names, emails and transcripts
+backend/.sessions.json

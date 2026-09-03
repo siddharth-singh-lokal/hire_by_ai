@@ -45,7 +45,7 @@ export interface QuestionBank {
   generatedAt: string;
   role: string;
   seniority: string;
-  durationMinutes: 15 | 30 | 45;
+  durationMinutes: 5 | 15 | 30 | 45;
   rubric: RubricAxis[];
   questions: BankQuestion[];
   claimsToVerify: { claim: string; jdRequirement: string }[];
@@ -53,10 +53,53 @@ export interface QuestionBank {
   openingLine: string;
 }
 
+export interface CandidateSession {
+  sessionId: string;
+  candidateName: string;
+  role: string;
+  durationMinutes: number;
+  questionCount: number;
+}
+
+/** Candidate lookup by email. Returns nothing that reveals the questions. */
+export function candidateSignIn(email: string): Promise<CandidateSession> {
+  return post<CandidateSession>("/api/candidate/signin", { email });
+}
+
+export interface AdminSessionRow {
+  id: string;
+  candidateName: string;
+  candidateEmail: string;
+  role: string;
+  seniority: string;
+  durationMinutes: number;
+  questionCount: number;
+  status: "ready" | "in_progress" | "grading" | "completed" | "terminated";
+  createdAt: number;
+  terminationReason?: string;
+  verdict?: string;
+  overallScore?: number;
+  transcriptCount?: number;
+  gradingError?: string;
+}
+
+export async function listAdminSessions(): Promise<AdminSessionRow[]> {
+  const res = await fetch(`${BACKEND_URL}/api/admin/sessions`);
+  if (!res.ok) throw new Error("Could not load interviews.");
+  return (await res.json()).sessions;
+}
+
+export async function getAdminSession(id: string): Promise<any> {
+  const res = await fetch(`${BACKEND_URL}/api/admin/sessions/${id}`);
+  if (!res.ok) throw new Error("Could not load that interview.");
+  return (await res.json()).session;
+}
+
 export interface PrepareResult {
   success: boolean;
   sessionId: string;
   candidateName: string;
+  candidateEmail: string;
   bank: QuestionBank;
   grounded: boolean;
 }
@@ -65,7 +108,8 @@ export function prepareInterview(input: {
   jdText: string;
   resumeText: string;
   candidateName: string;
-  durationMinutes: 15 | 30 | 45;
+  candidateEmail: string;
+  durationMinutes: 5 | 15 | 30 | 45;
 }): Promise<PrepareResult> {
   return post<PrepareResult>("/api/prepare", input);
 }
@@ -104,11 +148,41 @@ export async function fetchContextPack(): Promise<ContextPackSummary> {
   return res.json();
 }
 
-export function evaluateInterview(input: {
-  sessionId?: string;
-  transcripts: unknown[];
-  durationSeconds: number;
-  redFlags: unknown[];
-}): Promise<{ evaluation: any; genericComparison: any }> {
-  return post("/api/evaluate", input);
+/**
+ * Reports the end of an interview.
+ *
+ * Only proctoring flags and elapsed time travel from the browser — the
+ * transcript was recorded server-side by the relay as it streamed, so the
+ * result no longer depends on the candidate's tab staying open.
+ */
+export function completeInterview(
+  sessionId: string,
+  input: { redFlags: unknown[]; durationSeconds: number; terminationReason?: string }
+): Promise<{ success: boolean }> {
+  return post(`/api/interview/${sessionId}/complete`, input);
+}
+
+export interface ScorecardResponse {
+  status: "ready" | "in_progress" | "grading" | "completed" | "failed";
+  candidateName?: string;
+  role?: string;
+  evaluation?: any;
+  genericComparison?: any;
+  transcripts?: any[];
+  transcriptCount?: number;
+  terminationReason?: string;
+  message?: string;
+}
+
+export async function fetchScorecard(sessionId: string): Promise<ScorecardResponse> {
+  const res = await fetch(`${BACKEND_URL}/api/scorecard/${sessionId}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && res.status !== 500) {
+    throw new Error((data as any)?.message || "Could not load that scorecard.");
+  }
+  return data as ScorecardResponse;
+}
+
+export function regradeInterview(sessionId: string): Promise<{ success: boolean }> {
+  return post(`/api/scorecard/${sessionId}/regrade`, {});
 }

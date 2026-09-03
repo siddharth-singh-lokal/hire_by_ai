@@ -25,6 +25,7 @@ dotenv.config();
  */
 
 const RAW_DIR = path.join(__dirname, "raw");
+const PROFILE_PATH = path.join(__dirname, "company-profile.md");
 const OUTPUT = path.join(__dirname, "context-pack.json");
 
 /**
@@ -135,9 +136,18 @@ async function main() {
     }, {})
   ).map(([source, documentCount]) => ({ source, documentCount }));
 
+  // Hand-maintained and public-safe, so it bypasses sanitization by design.
+  const companyProfile = fs.existsSync(PROFILE_PATH)
+    ? fs.readFileSync(PROFILE_PATH, "utf8")
+    : "";
+  if (!companyProfile) {
+    console.log("\nNote: no company-profile.md — interviews will have no culture context.");
+  }
+
   const pack: ContextPack = {
     version: "1",
     generatedAt: new Date().toISOString(),
+    companyProfile,
     stackProfile,
     scenarios,
     sourceSummary,

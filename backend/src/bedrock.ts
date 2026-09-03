@@ -13,23 +13,31 @@ import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 export const AWS_REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-west-2";
 
 /**
- * Model per task, chosen by what this sandbox actually grants (opus-5, sonnet-5,
- * gpt-5.6 and grok all return AccessDenied here).
+ * Model per task. Chosen by what this sandbox actually grants — opus-5,
+ * sonnet-5, gpt-5.6 and grok all return AccessDenied — and then benchmarked.
  *
- *  - Bank generation and evaluation are quality-critical and latency-tolerant:
- *    they run once, before or after the call, never inside the voice loop.
- *    Opus 4.6 is the strongest reasoning model available.
- *  - Sanitization runs once per source document, so it is the bulk workload.
- *    Sonnet 4.6 is fast, cheap and more than good enough for extraction.
- *  - The leak validator stays on Sonnet deliberately: it is an independent
- *    check, and using a different model from the one that wrote the text means
- *    a blind spot in one is less likely to be shared by the other.
+ * Sonnet 4.6 everywhere, deliberately:
+ *
+ *  - EVALUATION: measured against Opus 4.6 on the same transcript, Sonnet gave
+ *    the same overall score with the same structured output (evidence moments,
+ *    gap matrix, R1 briefing all intact) at a fraction of the cost. Opus is
+ *    still a one-line override when a decision warrants it.
+ *  - GENERATION: Haiku 4.5 finished only ~25% faster (51s vs 68s) because the
+ *    bottleneck is output size, not model speed — and it surfaced 3 JD gaps
+ *    where Sonnet found 5. Not a trade worth making, especially since this runs
+ *    on the admin side before the candidate exists.
+ *  - SANITIZATION: bulk workload, and kept on a different model from whatever
+ *    generates the interview, so a blind spot in one is less likely to be
+ *    shared by the other.
+ *
+ * Nothing here sits inside the voice loop: Nova Sonic handles the live call and
+ * these all run before or after it.
  */
 export const EVALUATION_MODEL_ID =
-  process.env.BEDROCK_EVALUATION_MODEL_ID || "us.anthropic.claude-opus-4-6-v1";
+  process.env.BEDROCK_EVALUATION_MODEL_ID || "us.anthropic.claude-sonnet-4-6";
 
 export const GENERATION_MODEL_ID =
-  process.env.BEDROCK_GENERATION_MODEL_ID || "us.anthropic.claude-opus-4-6-v1";
+  process.env.BEDROCK_GENERATION_MODEL_ID || "us.anthropic.claude-sonnet-4-6";
 
 export const SANITIZER_MODEL_ID =
   process.env.BEDROCK_SANITIZER_MODEL_ID || "us.anthropic.claude-sonnet-4-6";
