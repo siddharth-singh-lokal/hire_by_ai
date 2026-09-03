@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "generatedAt": "2026-09-03T12:59:54.045Z",
+  "generatedAt": "2026-09-03T17:02:07.336Z",
   "companyProfile": "# Company Profile\n\nHand-maintained. Loaded into every question bank, whether or not Confluence and\nSlack are connected — so the system produces culture and context signal for any\norganisation with nothing but this file.\n\nKeep it public-safe. Everything here is the kind of thing that appears on a\ncareers page. Nothing internal, nothing confidential. If a fact would embarrass\nyou on a job ad, it does not belong in this file.\n\nReplace the contents below with your own organisation's.\n\n---\n\n## Mission\n\nUnlock the economic and social potential of \"Bharat\" — the roughly 900 million\nIndians who live, work and transact in their native languages rather than in\nEnglish.\n\n## What we build\n\nA multi-product ecosystem rather than a single app: local news and civic\ninformation, jobs and hiring, classifieds, matrimony, agricultural advisory,\nedutainment, astrology, and peer support. Nine-plus products, one platform\nfoundation.\n\n## Who we build for\n\nUsers in Tier 2 and Tier 3 towns and beyond — 250+ districts, 10+ Indian\nlanguages, 60M+ users. Many are on low-end devices and intermittent connections,\nand many are coming online for the first time. They are not the users most\nengineers design for by default.\n\n## Engineering reality\n\nEngineers should expect, and be comfortable with:\n\n- **Multi-product context switching.** Teams operate as small autonomous pods.\n  People move between products. Depth in one vertical matters less than the\n  ability to pick up an unfamiliar system quickly.\n- **Cost-conscious infrastructure.** Instances are sized deliberately small.\n  \"Scale the box up\" is available but is rarely the first answer. Engineers are\n  expected to reason about what a system actually needs before adding capacity.\n- **Consumer scale on a tight budget.** Traffic is large and margins are thin.\n  Efficiency is a design constraint, not an afterthought.\n- **Fast iteration.** Priorities shift. Scoping and sequencing judgment matters\n  as much as implementation.\n- **Real users, real consequences.** A bug does not inconvenience a SaaS\n  dashboard; it affects someone's job application or crop advisory.\n\n## What we value in people\n\n- **Ownership over process.** Ship it, watch it, fix it.\n- **Pragmatism over purity.** The right answer accounts for the constraint you\n  actually have, not the one you wish you had.\n- **Honesty about limits.** \"I don't know, here is how I'd find out\" is a strong\n  answer. Confident bluffing is not.\n- **Curiosity about the user.** The best engineers here can explain who uses the\n  thing they built and why it matters to them.\n\n## How to read this during an interview\n\nThis describes the environment, not a checklist. A candidate is not expected to\nhave worked somewhere like this before, and unfamiliarity with the context is\nnever a mark against them. Use it only to judge whether the way someone reasons\nwould translate here — and to keep scenarios realistic.\n",
   "stackProfile": {
     "languages": [
@@ -14,7 +14,7 @@
       "Kubernetes (pods)",
       "Gunicorn (gthread worker class, multi-threaded)",
       "Django 5.1",
-      "psycopg3 connection pooling",
+      "psycopg3 (connection pooling)",
       "Cloud-hosted small database instance (2 vCPU, SSD)"
     ],
     "observability": [
@@ -23,61 +23,61 @@
       "Query-level performance visibility"
     ],
     "operatingConstraints": [
-      "Cost-sensitive: runs on a minimal database instance (2 vCPU, SSD), so connection overhead and CPU saturation are meaningful concerns at normal traffic levels",
+      "Cost-sensitive: runs on a minimal database instance (2 vCPU, SSD), making connection overhead and CPU saturation primary engineering concerns",
       "Small, fixed pod count with low per-pod concurrency (1 worker process, 2 threads per pod); pool sizing is tightly coupled to thread count to avoid over-provisioning connections",
-      "No read replica: a logical read/write split is implemented in the routing layer but both aliases resolve to the same database instance, doubling effective connection pool pressure on one box",
-      "Connection budget is a hard constraint: total open connections = pods × workers × pooled aliases × pool size; any horizontal scaling requires recalculating and potentially resizing the database instance",
-      "Cache stampede risk on deploy: versioned cache keys cause full cold-cache conditions across all workers simultaneously when a deploy changes key shape, with no locking or staggered warm-up mechanism",
-      "Fixed-TTL caching (24h) without jitter or admin-triggered refresh creates predictable daily DB CPU spikes when cache expires and traffic is concurrent",
-      "Feature toggles used as rollback mechanism (env-var-driven pool enable/disable) rather than code rollbacks, implying preference for operational simplicity over code branching",
-      "Shared infrastructure across prod, dev, and local environments uses identical settings, reducing environment-specific configuration drift but limiting environment-specific tuning"
+      "No read replica: a logical read/write split via router aliases both resolve to the same database instance, doubling effective connection pool count against a single host",
+      "Connection budget is a hard shared resource: total open connections = pods × workers × pooled aliases × pool size; any horizontal scaling requires recalculating and potentially resizing the database instance",
+      "Cache stampede risk on deploy: versioned cache keys cause full cold-start on all workers simultaneously; no distributed locking or probabilistic early expiry in place",
+      "Fixed-TTL caching pins cache expiry to a predictable daily time, creating recurring load spikes if no admin activity refreshes the cache before expiry",
+      "Rollback strategy for infrastructure changes is env-var-driven (feature flag) rather than code rollback, implying preference for operational toggles over redeployment",
+      "Parity across environments: production, development, and local share the same database configuration settings"
     ]
   },
   "scenarios": [
     {
-      "id": "connection-pool-sizing-small-db",
-      "title": "Sizing a connection pool for a small 2-vCPU database shared across multiple aliases and pods",
+      "id": "connection-pool-sizing-formula",
+      "title": "Sizing a connection pool for a small database instance shared by multiple pools",
       "stack": [
         "PostgreSQL",
         "Django",
         "psycopg3",
-        "Gunicorn",
-        "Kubernetes"
+        "Gunicorn"
       ],
       "constraints": [
-        "database is a 2-vCPU instance with SSD storage",
-        "two logical DB aliases (read and write) both point to the same physical instance",
-        "each pod runs one Gunicorn worker with 2 threads (gthread mode)",
-        "multiple pods share the same database instance"
+        "database runs on a 2-vCPU instance",
+        "two logical DB aliases both point to the same physical instance",
+        "each Gunicorn worker runs 2 threads",
+        "multiple pods can be added during scale-out"
       ],
-      "prompt": "A team is deploying Django 5.1 connection pooling (psycopg3) against a small 2-vCPU PostgreSQL instance. The application uses two database aliases — one for writes and one for reads — but both aliases resolve to the same physical database host (there is no read replica). The deployment runs multiple pods, each with a single Gunicorn worker configured with 2 threads. Walk through how you would size the connection pool, and explain what happens to total connection count as the deployment scales out.",
+      "prompt": "A service runs Django with psycopg3 connection pooling against a PostgreSQL instance with 2 vCPUs and SSD storage. The application has two database aliases ('default' and 'slave') that both resolve to the same physical database instance. The deployment runs 2 pods, each with 1 Gunicorn worker process using 2 threads. Walk through how you would determine the correct pool size per alias, and what constraints you would document for future scale-out.",
       "probes": [
-        "How does the HikariCP formula apply here, and what does it tell you about the maximum useful concurrency for this instance?",
-        "Django creates one pool per alias per worker process — what does that mean for the total open connections on the database, and how does it change when you add a pod?",
-        "The two aliases point to the same host. Does that affect your sizing decision? Why or why not?",
-        "What should MIN_SIZE be relative to MAX_SIZE, and why would you ever set them equal?",
-        "If pool-timeout errors start appearing in logs, what is the correct remediation sequence before simply raising MAX_SIZE?"
+        "The HikariCP formula gives a budget of 5 concurrent connections for this instance. How does that budget interact with having two pools pointing at the same box?",
+        "If the team decides to scale from 2 pods to 4 pods without changing pool size, what happens to the connection count on the database instance?",
+        "Why would you set MIN_SIZE equal to MAX_SIZE rather than letting the pool grow dynamically?",
+        "What is the risk of setting pool size larger than the number of threads per worker?"
       ],
       "weakAnswer": [
-        "Sets MAX_SIZE to a large number 'to avoid timeouts' without accounting for the number of threads or the database's CPU budget.",
-        "Treats the two aliases as independent capacity and doubles the effective connection budget.",
-        "Ignores the per-alias, per-worker-process pool multiplication and underestimates total connections.",
-        "Does not consider what happens to connection count when pods are added."
+        "Sets pool size to a round number like 5 or 10 without accounting for thread count or alias multiplicity",
+        "Does not consider that two aliases pointing at the same instance both consume from the same physical connection budget",
+        "Ignores the multiplicative effect of pods × workers × aliases × pool size"
       ],
       "strongAnswer": [
-        "Applies the formula (core_count × 2) + effective_spindle_count to derive a whole-instance connection budget (roughly 5 for a 2-vCPU SSD instance).",
-        "Recognises that both aliases land on the same physical instance, so their pools consume from the same budget — the aliases are not independent.",
-        "Derives MAX_SIZE from the thread count per worker (2 threads → pool of 2), because a larger pool can never be fully utilised by a single worker.",
-        "Calculates total open connections as: pods × workers-per-pod × pooled-aliases × MAX_SIZE, and notes this must stay within the instance budget.",
-        "Flags that every new pod adds (workers × aliases × MAX_SIZE) connections to the instance, so scaling out requires redoing the math or upsizing the database.",
-        "Recommends setting MIN_SIZE = MAX_SIZE to eliminate pool growth/shrink overhead and keep connection count predictable.",
-        "Notes that pool-timeout errors indicate the pool is exhausted and the correct response is to first verify the sizing math, then raise CONCURRENCY and pool size together — not to blindly increase MAX_SIZE."
+        "Applies the core-count formula (cores × 2 + spindle_count) to derive the instance-level connection budget (~5 for 2 vCPUs + SSD)",
+        "Recognises that two aliases on the same physical instance both draw from that budget, so the per-alias pool size must be sized with the total in mind",
+        "Derives max_size = threads_per_worker = 2, because a pool larger than the thread count can never be fully utilised and wastes the connection budget",
+        "Calculates total open connections as pods × workers × aliases × pool_size and verifies it stays within the instance budget",
+        "Notes that scale-out (adding pods) linearly increases the connection count and requires redoing this calculation or upsizing the instance",
+        "Explains why MIN_SIZE = MAX_SIZE avoids pool growth/shrink overhead and makes connection count predictable for capacity planning"
       ],
       "competencies": [
         "databases",
-        "concurrency",
+        "connection pooling",
         "capacity planning",
-        "scaling patterns"
+        "concurrency"
+      ],
+      "disciplines": [
+        "backend",
+        "devops"
       ],
       "difficulty": 3
     },
@@ -86,35 +86,160 @@
       "title": "Preventing 'server closed the connection unexpectedly' errors from idle timeout mismatches",
       "stack": [
         "PostgreSQL",
-        "psycopg3",
-        "Django"
+        "Django",
+        "psycopg3"
       ],
       "constraints": [
         "connection pool keeps connections alive across requests",
-        "multiple layers (Postgres, pgbouncer, load balancer, NAT) each have their own idle timeout",
-        "pool does not detect a server-side connection close until a request tries to use the dead connection"
+        "multiple layers between application and database can close idle connections (Postgres, pgbouncer, NAT/load balancer)"
       ],
-      "prompt": "A service using a persistent connection pool starts seeing intermittent 'server closed the connection unexpectedly' OperationalErrors in production. The errors are not reproducible under load — they tend to appear after quiet periods. Explain the failure mode, how to diagnose it, and how to configure the pool to prevent it.",
+      "prompt": "A team deploys connection pooling for their Django application. Shortly after, they start seeing intermittent 'OperationalError: server closed the connection unexpectedly' errors in production, but only on requests that arrive after a period of low traffic. The pool configuration has MAX_IDLE set to 10 minutes. Diagnose the likely cause and explain the fix.",
       "probes": [
-        "At which layer does the connection actually get closed, and why doesn't the pool notice immediately?",
-        "What is the correct ordering relationship between the pool's MAX_IDLE setting and every server-side idle timeout in the path?",
-        "Which server-side timeouts need to be considered beyond just PostgreSQL's own idle_session_timeout?",
-        "How does MAX_LIFETIME protect against a different but related class of stale-connection problems?",
-        "How would you verify in a staging environment that your idle timeout ordering is correct before deploying?"
+        "Which layer is most likely closing the connection first — the application pool, Postgres itself, pgbouncer, or a NAT gateway — and how would you determine which one?",
+        "Why does the pool not detect that the connection is dead before handing it to a request?",
+        "If you cannot change the NAT gateway's idle timeout (it is managed infrastructure), what are your options on the application side?",
+        "How would you verify the fix is working without waiting for another low-traffic period?"
       ],
       "weakAnswer": [
-        "Suggests adding retry logic in application code as the primary fix.",
-        "Only considers PostgreSQL's own timeout and ignores intermediate infrastructure (load balancers, NAT gateways, pgbouncer).",
-        "Recommends disabling idle connection cleanup entirely to avoid the problem.",
-        "Does not explain why the error is intermittent or why it correlates with quiet periods."
+        "Suggests increasing MAX_IDLE without investigating which layer is closing connections first",
+        "Recommends disabling pooling entirely as the solution",
+        "Does not explain why the error only appears after idle periods"
       ],
       "strongAnswer": [
-        "Identifies the root cause: the server (or an intermediate layer) closes an idle connection, but the pool's health check only runs when a connection is borrowed — so the dead connection is handed to the next request, which then fails.",
-        "States the invariant clearly: the pool's MAX_IDLE timeout must be shorter than every idle timeout in the path — Postgres idle_session_timeout, any pgbouncer server_idle_timeout, and any load balancer or NAT idle timeout.",
-        "Enumerates all layers that can silently drop idle TCP connections: the database server itself, connection poolers like pgbouncer, cloud load balancers, and NAT gateways (which often have aggressive idle timeouts around 350–600 seconds).",
-        "Explains MAX_LIFETIME as a separate protection: it recycles connections on a wall-clock schedule regardless of activity, guarding against slow server-side leaks and stale DNS or connections pointing at a dead primary after a failover.",
-        "Suggests verifying by deliberately setting a very short server-side idle timeout in staging and confirming that pool-side MAX_IDLE fires first with no errors reaching the application.",
-        "Mentions that some pool implementations support a keep-alive or pre-ping option as a defence-in-depth measure, but notes it adds latency to every borrow and is not a substitute for correct timeout ordering."
+        "Identifies the root cause: a network layer (Postgres idle_session_timeout, pgbouncer server_idle_timeout, or NAT idle timeout) is closing the connection before the pool's MAX_IDLE fires, leaving a dead connection in the pool",
+        "Explains that the pool has no way to detect a server-side close until it tries to use the connection, at which point the request fails",
+        "States the invariant: the pool's MAX_IDLE must be strictly less than every server-side idle timeout in the path",
+        "Suggests auditing all idle timeouts in the stack (Postgres, any proxy, load balancer, NAT) and setting MAX_IDLE below the smallest one",
+        "Mentions that MAX_LIFETIME provides a secondary defence against stale connections regardless of idle timeout",
+        "Notes that a keepalive or connection validation on borrow (test-on-acquire) is an alternative if timeout values cannot be controlled"
+      ],
+      "competencies": [
+        "databases",
+        "connection pooling",
+        "reliability",
+        "failure modes"
+      ],
+      "disciplines": [
+        "backend"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "pool-timeout-vs-worker-timeout",
+      "title": "Setting pool acquisition timeout below the web worker timeout to surface errors cleanly",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "psycopg3",
+        "Gunicorn"
+      ],
+      "constraints": [
+        "Gunicorn worker timeout is 30 seconds",
+        "pool has a fixed maximum size equal to thread count",
+        "pool exhaustion under load should produce a clean error, not a killed worker"
+      ],
+      "prompt": "A Django application uses a connection pool with a fixed size equal to the number of Gunicorn threads. The Gunicorn worker timeout is 30 seconds. A developer proposes setting the pool acquisition timeout (how long a request waits for a free connection) to 30 seconds to match. What is wrong with this approach, and what value would you choose instead?",
+      "probes": [
+        "What happens operationally when a Gunicorn worker is killed by the worker timeout versus when a request raises a clean application-level exception?",
+        "How does the pool timeout interact with observability — which scenario is easier to alert on and diagnose?",
+        "If pool timeouts start appearing frequently in logs, what does that indicate about the relationship between traffic, thread count, and query duration?"
+      ],
+      "weakAnswer": [
+        "Agrees that matching the worker timeout is fine because requests will eventually get a connection",
+        "Suggests simply increasing the pool size to avoid the problem without considering the instance budget",
+        "Does not distinguish between a killed worker and a clean exception"
+      ],
+      "strongAnswer": [
+        "Identifies that setting pool timeout equal to worker timeout means a request waiting for a connection will hold the worker for the full 30 seconds before either getting a connection or being killed — no clean error is surfaced",
+        "Explains that a pool timeout well below the worker timeout (e.g. 10 seconds) causes the request to fail fast with an OperationalError that can be caught, logged, and returned as a 503, rather than killing the worker",
+        "Notes that killed workers are harder to observe and alert on than application-level exceptions, and can mask pool exhaustion as generic worker churn",
+        "Recognises that frequent pool timeouts are a signal that query latency × concurrency exceeds pool capacity, pointing to a need to either reduce query time, increase pool size (after redoing capacity math), or scale out"
+      ],
+      "competencies": [
+        "reliability",
+        "observability",
+        "connection pooling",
+        "web server configuration"
+      ],
+      "disciplines": [
+        "backend"
+      ],
+      "difficulty": 2
+    },
+    {
+      "id": "env-parity-pool-settings",
+      "title": "Keeping connection pool settings identical across all environments to catch pool exhaustion locally",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "psycopg3"
+      ],
+      "constraints": [
+        "development and local environments historically had much larger pool sizes than production",
+        "pool exhaustion and timeout behaviour only manifested in production"
+      ],
+      "prompt": "A team discovers that their local and development environments have connection pool settings (min 5, max 20, timeout 30 seconds) that are much more generous than production (min 2, max 2, timeout 10 seconds). A bug where the pool becomes exhausted under moderate load has only ever been caught in production. What are the risks of this configuration divergence, and how would you address it?",
+      "probes": [
+        "What categories of bugs become invisible in development when the pool is much larger than in production?",
+        "Are there any legitimate reasons to have different pool settings per environment, and how would you handle those cases?",
+        "How would you validate that bringing dev/local settings down to production values does not break normal development workflows?"
+      ],
+      "weakAnswer": [
+        "Treats the divergence as acceptable because production is the 'real' environment",
+        "Suggests only fixing the production settings without changing dev/local",
+        "Does not identify specific failure modes that are masked by the larger dev pool"
+      ],
+      "strongAnswer": [
+        "Identifies that a larger dev pool masks pool exhaustion bugs: code that holds connections too long, N+1 patterns that consume connections, or request handlers that forget to release connections will never trigger a timeout locally but will in production",
+        "Notes that timeout behaviour (what happens when all connections are busy) is completely untestable locally if the timeout is 3× longer and the pool is 10× larger",
+        "Recommends aligning all environments to production pool settings so that pool-related failures are reproducible locally and caught before deployment",
+        "Acknowledges the tradeoff: developers running multiple services locally may hit pool limits more easily, and suggests this is acceptable friction that reflects real production constraints",
+        "Suggests that if environment-specific overrides are truly needed (e.g. a CI environment with many parallel test workers), they should be explicit and documented rather than accidental"
+      ],
+      "competencies": [
+        "reliability",
+        "developer experience",
+        "environment parity",
+        "connection pooling"
+      ],
+      "disciplines": [
+        "backend",
+        "devops"
+      ],
+      "difficulty": 1
+    },
+    {
+      "id": "connection-count-after-failover",
+      "title": "Handling stale pooled connections after a database primary failover",
+      "stack": [
+        "PostgreSQL",
+        "Django",
+        "psycopg3"
+      ],
+      "constraints": [
+        "connections are long-lived (up to 1 hour by MAX_LIFETIME)",
+        "after a failover the old primary is gone and connections pointing to it are dead",
+        "pool reconnect timeout is short (a few seconds)"
+      ],
+      "prompt": "A service uses a connection pool with a maximum connection lifetime of 1 hour. The database undergoes a primary failover. Describe what happens to the existing pooled connections, how the pool should behave during and after the failover, and what settings or design choices affect how quickly the application recovers.",
+      "probes": [
+        "What is the difference in recovery behaviour between a pool that validates connections on borrow versus one that only discovers dead connections on first use?",
+        "How does MAX_LIFETIME help with post-failover recovery even if the reconnect logic works correctly?",
+        "If the reconnect timeout is set to 5 seconds but the failover takes 20 seconds to complete DNS propagation, what happens to requests during that window?",
+        "How would you test failover recovery behaviour without taking down a production database?"
+      ],
+      "weakAnswer": [
+        "Assumes the pool automatically detects the failover and reconnects transparently with no request errors",
+        "Does not distinguish between connections that are in-use during failover versus idle connections",
+        "Ignores DNS propagation delay as a factor in recovery time"
+      ],
+      "strongAnswer": [
+        "Explains that existing pooled connections point to the old primary's TCP endpoint; after failover those connections are dead but the pool does not know until it tries to use them",
+        "Describes the failure mode: the next request to borrow a dead connection gets an OperationalError; the pool should then discard that connection and attempt to open a new one to the (now-updated) endpoint",
+        "Notes that MAX_LIFETIME provides a ceiling on how long a stale connection can persist — even if reconnect logic fails silently, connections will be recycled within the lifetime window",
+        "Identifies DNS propagation as a gap: if the pool reconnects before DNS has updated to point to the new primary, it may reconnect to the wrong host or fail again",
+        "Explains that the reconnect timeout determines how long the pool retries before surfacing an error to the caller — too short and requests fail fast during a slow failover; too long and requests queue up",
+        "Suggests that connection validation on borrow (ping before returning to caller) reduces the window where dead connections are handed to requests, at the cost of an extra round-trip per request"
       ],
       "competencies": [
         "databases",
@@ -122,92 +247,14 @@
         "failure modes",
         "connection pooling"
       ],
+      "disciplines": [
+        "backend"
+      ],
       "difficulty": 3
     },
     {
-      "id": "pool-timeout-vs-worker-timeout",
-      "title": "Setting pool acquisition timeout below the web server request timeout to surface clean errors",
-      "stack": [
-        "PostgreSQL",
-        "Django",
-        "Gunicorn",
-        "psycopg3"
-      ],
-      "constraints": [
-        "Gunicorn has a hard request timeout that kills the worker process if exceeded",
-        "pool has a configurable timeout for how long a request waits for a free connection",
-        "pool exhaustion under load can cause requests to queue for a connection"
-      ],
-      "prompt": "A Django application uses a connection pool with a fixed maximum size. Under sustained load, all connections in the pool are in use and incoming requests must wait. Explain why the pool acquisition timeout should be set significantly below the web server's (e.g. Gunicorn's) request timeout, and what the operational difference is between the two failure modes.",
-      "probes": [
-        "What happens to the Gunicorn worker process if the request timeout fires while the worker is blocked waiting for a pool connection?",
-        "What does the application and its callers observe when the pool timeout fires instead?",
-        "How does the choice of timeout value affect your ability to detect pool exhaustion in monitoring?",
-        "If pool timeouts start appearing frequently, what does that tell you about the relationship between concurrency, pool size, and query duration?"
-      ],
-      "weakAnswer": [
-        "Sets both timeouts to the same value or sets the pool timeout higher than the worker timeout.",
-        "Treats a killed Gunicorn worker as an acceptable outcome equivalent to a clean error response.",
-        "Does not distinguish between the observability of the two failure modes.",
-        "Suggests simply increasing pool size as the only response to pool timeout errors."
-      ],
-      "strongAnswer": [
-        "Explains that if the pool timeout is longer than the Gunicorn request timeout, Gunicorn kills the worker process mid-wait — this is a hard process death, not a clean error, and can leave connections in an uncertain state.",
-        "Contrasts this with a pool timeout firing first: the application receives a clean exception, can return a proper 503 or error response, and the connection is never borrowed — no cleanup ambiguity.",
-        "Notes that clean pool-timeout errors are observable as a distinct error type in logs and metrics, making it easy to alert on pool exhaustion; worker kills are harder to correlate with the root cause.",
-        "Explains that frequent pool timeouts are a signal that (concurrency × average query duration) exceeds (pool size × timeout window), and the correct response is to diagnose query latency and concurrency before increasing pool size.",
-        "Mentions that keeping pool timeout well below worker timeout (e.g. one-third or less) also leaves headroom for the application to do other work — serialisation, response writing — within the remaining request budget."
-      ],
-      "competencies": [
-        "reliability",
-        "observability",
-        "concurrency",
-        "failure modes"
-      ],
-      "difficulty": 2
-    },
-    {
-      "id": "environment-parity-pool-settings",
-      "title": "Matching production connection pool settings in development and local environments",
-      "stack": [
-        "PostgreSQL",
-        "Django",
-        "psycopg3"
-      ],
-      "constraints": [
-        "development environments historically used much larger pool sizes and longer timeouts than production",
-        "pool exhaustion and timeout behaviour only manifests under production-like constraints"
-      ],
-      "prompt": "A team discovers that their development and local environments use a connection pool configured with a much larger max size and a longer acquisition timeout than production. A developer argues this is fine because dev machines have more resources and developers should not be blocked by pool timeouts. A senior engineer disagrees. What is the engineering argument for keeping pool settings identical across environments, and what class of bugs does the discrepancy hide?",
-      "probes": [
-        "Give a concrete example of a bug that would be invisible in a large-pool dev environment but would cause failures in production.",
-        "How does a longer pool timeout in dev change the feedback loop for a developer writing code that holds connections longer than intended?",
-        "Are there cases where environment-specific pool settings are justified? What would those be?",
-        "How does this relate to the broader principle of environment parity?"
-      ],
-      "weakAnswer": [
-        "Agrees with the developer — dev environments should be permissive to avoid slowing down development.",
-        "Only mentions that 'it should match prod' without explaining what specific failure modes are hidden.",
-        "Does not connect pool settings to observable application behaviour."
-      ],
-      "strongAnswer": [
-        "Identifies that a large pool in dev masks connection-leak bugs: code that forgets to release a connection, or holds one across a slow external call, will never exhaust a pool of 20 but will immediately exhaust a pool of 2.",
-        "Notes that a long acquisition timeout in dev hides latency: a request that waits 25 seconds for a connection looks fine in dev (timeout is 30s) but would fail in production (timeout is 10s) — the bug is invisible until production.",
-        "Explains that pool exhaustion under concurrency is only reproducible if the pool size matches production; with a large dev pool, developers never encounter the 'all connections busy' state and cannot reason about it.",
-        "Acknowledges legitimate exceptions: a developer running a migration or a one-off script might need a separate connection outside the pool, but that is a different configuration path, not a reason to inflate the shared pool.",
-        "Connects to the general principle: the value of environment parity is that bugs surface at development time when they are cheap to fix, not at production time when they are expensive."
-      ],
-      "competencies": [
-        "databases",
-        "reliability",
-        "deployment",
-        "observability"
-      ],
-      "difficulty": 2
-    },
-    {
       "id": "cache-stampede-fixed-ttl",
-      "title": "Cache stampede from fixed TTL causing daily DB CPU saturation",
+      "title": "Cache stampede from a fixed TTL causing daily DB CPU saturation",
       "stack": [
         "PostgreSQL",
         "Redis",
@@ -215,82 +262,85 @@
         "Celery"
       ],
       "constraints": [
-        "cache-aside pattern with no stampede protection",
-        "24-hour TTL pinned to a fixed wall-clock time",
-        "expensive multi-relation prefetch query across all active records"
+        "cache TTL is fixed at 24 hours",
+        "cache is only refreshed on explicit admin writes",
+        "no distributed locking on cache population",
+        "query prefetches multiple relations for every active record simultaneously"
       ],
-      "prompt": "A service caches an expensive database query result in Redis with a 24-hour TTL. The query joins several tables and prefetches four related collections for every active record in a set. The cache is only explicitly invalidated when an admin saves a record; otherwise it simply expires after 24 hours. Engineers notice that every day at roughly the same time, database CPU spikes to saturation and unrelated APIs begin returning 5xx errors. The pattern repeats with near-clockwork regularity. What is happening, and how would you fix it?",
+      "prompt": "A service caches an expensive database query — a wide join that prefetches four related tables for every active record — in Redis with a 24-hour TTL. The cache is only refreshed when an admin user saves a record. One day the team notices that every afternoon at roughly the same time, database CPU spikes to saturation and unrelated APIs start returning 5xx errors. The pattern repeats daily for several days. Walk through how you would diagnose this, identify the root cause, and propose both an immediate fix and a longer-term solution.",
       "probes": [
-        "The daily spike time drifted by about an hour after a deployment. Why might a deployment shift the expiry clock?",
-        "How would you implement stampede protection without introducing a hard serialisation bottleneck on every cache miss?",
-        "The fix adds a TTL jitter. What range is appropriate, and what are the tradeoffs of jitter that is too small versus too large?",
-        "Even with stampede protection, the first request after a cold start still hits the DB. How would you warm the cache proactively on deploy?",
-        "Why does DB CPU saturation cause unrelated APIs to time out rather than just the offer-related endpoints?"
+        "The spike started on a specific day and shifted to a slightly different time after a deployment. What does that tell you about the relationship between the deploy and the TTL clock?",
+        "If you add a distributed lock so only one worker populates the cache, what happens to all the other workers waiting on that lock while the expensive query runs?",
+        "How would you handle the case where the lock-holder crashes mid-population?",
+        "Beyond locking, what other strategies exist to prevent a cold-cache burst on a high-traffic key?",
+        "The query was also fetching logically expired records because a boolean flag was stale. How does that interact with the stampede problem, and how would you address it?"
       ],
       "weakAnswer": [
         "Increase the TTL so the cache expires less often.",
         "Add an index to make the query faster.",
-        "Scale up the database instance."
+        "Identify the slow query in pg_stat_activity and kill it."
       ],
       "strongAnswer": [
-        "Identifies the thundering-herd / cache-stampede pattern: when the TTL expires, all in-flight workers simultaneously find the cache empty and each independently fires the full prefetch query, multiplying load by the number of concurrent workers.",
-        "Explains why the expiry is pinned to the same time each day: the TTL was set at a fixed moment (the last admin save or the deploy), so 24 hours later it expires at the same wall-clock time, and the pattern repeats until the cache is refreshed at a different time.",
-        "Explains the deploy-induced cold start: changing the cache key version on deploy discards the warm cache entirely, so all pods start cold simultaneously and the first wave of requests all miss at once.",
-        "Proposes stampede protection via a probabilistic early recomputation (e.g. fetch-and-lock with a short mutex TTL, or the XFetch / probabilistic refresh algorithm) so only one worker regenerates the cache while others serve the stale value.",
-        "Suggests adding TTL jitter (e.g. base TTL ± random offset) so expirations are spread across a window rather than all hitting at the same second.",
-        "Recommends a background job or deploy hook that pre-warms the cache before the old key expires or immediately after a key change, so the DB is never hit cold under live traffic.",
-        "Notes that DB CPU saturation is a shared resource problem: a single expensive query consuming most CPU starves the connection pool and query executor for all other queries, which is why unrelated endpoints time out.",
-        "Identifies the secondary issue: stale records with is_active=True but a past end timestamp inflate the result set unnecessarily, making the query heavier than the business data warrants, and recommends a background cleanup job plus a tighter query filter."
+        "Recognises this as a classic cache stampede: a fixed TTL causes all workers to find the cache empty simultaneously and independently fire the same expensive query.",
+        "Traces the daily recurrence to the TTL clock being anchored to the time the cache was last written — because the cache is only refreshed on admin saves, the expiry stays pinned to the same wall-clock time each day.",
+        "Explains how a deployment that changes the cache key invalidates the warm cache instantly, causing an immediate spike at deploy time and resetting the TTL clock to a new fixed time.",
+        "Proposes probabilistic early expiration (e.g. fetch-and-refresh slightly before TTL expires) or jitter on the TTL to spread expiry across a window rather than a single moment.",
+        "Proposes a mutex/distributed lock (e.g. Redis SET NX) so only one worker regenerates the cache while others either wait or serve a stale value — and discusses the tradeoff between waiting and serving stale.",
+        "Mentions background refresh: a scheduled job proactively rewarms the cache before it expires, decoupling cache population from request traffic entirely.",
+        "Identifies the stale-flag problem (records marked active but logically expired) as an independent contributor that bloats the query and should be fixed with a filter on the expiry timestamp plus a background cleanup job to correct the flag, keeping future queries lean.",
+        "Notes that the fix to the stale-flag filter should be deployed carefully — it changes the shape of cached data, which may require a cache key bump, which would itself cause another cold-start spike if stampede protection is not in place first."
       ],
       "competencies": [
-        "caching strategy",
-        "thundering herd / stampede protection",
-        "query performance",
-        "failure modes",
-        "observability",
-        "deployment and rollback"
+        "caching",
+        "databases",
+        "reliability",
+        "concurrency"
+      ],
+      "disciplines": [
+        "backend"
       ],
       "difficulty": 3
     },
     {
-      "id": "stale-flag-query-bloat",
-      "title": "Stale boolean flag causing query to process logically inactive records",
+      "id": "cache-key-versioning-cold-start",
+      "title": "Versioned cache key on deploy causes immediate cold-cache spike",
       "stack": [
-        "PostgreSQL",
-        "Django",
-        "Celery"
+        "Redis",
+        "Django"
       ],
       "constraints": [
-        "is_active flag not kept in sync with a separate ended_at timestamp",
-        "no background reconciliation job",
-        "query filters only on boolean flag, ignoring the timestamp"
+        "cache key is versioned to match the shape of serialized data",
+        "all application pods start simultaneously on deploy",
+        "no cache warming step in the deployment pipeline"
       ],
-      "prompt": "A service has a table of records that each carry both an is_active boolean and an ended_at timestamp. The query that fetches 'active' records filters only on is_active=True and ignores ended_at. Over time, many records accumulate where is_active is still True but ended_at is in the past. The query result set — and the downstream prefetch of four related collections — grows steadily larger than the true active set. How would you detect this drift, fix the immediate query, and prevent the divergence from recurring?",
+      "prompt": "A team versions their Redis cache keys whenever the shape of the cached data changes, so that new application code never reads data serialized by old code. After a routine deployment, monitoring shows an immediate database CPU spike the moment the new pods come up, even though the cache was fully warm before the deploy. Why does this happen, and what strategies would you use to prevent it?",
       "probes": [
-        "A one-time UPDATE to set is_active=False for all expired rows could lock the table if the set is large. How would you do this safely in production?",
-        "If you add ended_at__gte=now() to the query, the result becomes time-dependent and harder to cache. How does that affect your caching strategy?",
-        "How would you write the Celery task so it is idempotent and safe to run multiple times concurrently?",
-        "What index would you add to support the combined is_active + ended_at filter efficiently?"
+        "If you warm the cache as a deployment step before pods start serving traffic, what race condition could still occur?",
+        "How would you handle a rollback — the old key is gone, the new key is warm, but you need to go back to old code?",
+        "Is there a way to avoid versioning the key at all while still preventing old code from reading incompatible data?",
+        "How does a blue-green or canary deployment change the risk profile here compared with a rolling restart?"
       ],
       "weakAnswer": [
-        "Just add a WHERE clause to filter on ended_at.",
-        "Delete the old records."
+        "Don't version cache keys — just let old and new code share the same key.",
+        "Increase pod startup time so they don't all hit the DB at once.",
+        "Accept the spike; it only lasts a few seconds."
       ],
       "strongAnswer": [
-        "Identifies the root cause as a dual-source-of-truth problem: the boolean flag and the timestamp can diverge because nothing keeps them in sync.",
-        "Fixes the immediate query by adding ended_at >= now() to the filter, reducing the result set to only genuinely active records.",
-        "Proposes a background reconciliation task (e.g. a periodic Celery beat job) that runs UPDATE … SET is_active=False WHERE is_active=True AND ended_at < now(), executed in batches to avoid long-held row locks.",
-        "Notes that batching the UPDATE (e.g. LIMIT 1000 with a loop) avoids table-level contention and keeps replication lag manageable.",
-        "Considers adding a partial index on (is_active, ended_at) WHERE is_active=True to make the combined filter efficient.",
-        "Recognises that if ended_at is used in the query, the cache TTL must be shorter than the minimum time until the next record expires, or the cache must be invalidated when a record's ended_at passes — otherwise the cache will serve stale active sets.",
-        "Suggests making the Celery task idempotent: the UPDATE predicate is naturally idempotent (re-running it on already-deactivated rows is a no-op), so concurrent runs are safe."
+        "Correctly identifies that bumping the cache key makes the previously warm cache invisible to new code, so all pods start cold simultaneously.",
+        "Proposes a pre-warming step in the deployment pipeline: populate the new cache key before routing traffic to new pods.",
+        "Discusses keeping the old key alive for a short overlap window so a rollback can still find warm data.",
+        "Considers canary or blue-green deployments to limit the number of cold pods hitting the DB at any one moment.",
+        "Raises the alternative of embedding a schema version inside the cached payload and having the reader validate it, so the key itself does not change and the cache remains warm — with a fallback to re-fetch on version mismatch.",
+        "Connects this back to stampede protection: even with pre-warming, if the warm-up itself is not serialized, multiple warm-up workers can fire the same expensive query simultaneously."
       ],
       "competencies": [
-        "schema design",
-        "query performance",
-        "data consistency",
-        "background job design",
-        "idempotency"
+        "caching",
+        "deployment",
+        "reliability"
+      ],
+      "disciplines": [
+        "backend",
+        "devops"
       ],
       "difficulty": 2
     }

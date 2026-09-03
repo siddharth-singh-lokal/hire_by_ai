@@ -102,12 +102,13 @@ ADVANCEMENT LANGUAGE, NOT HIRING LANGUAGE. The recommendation describes what to 
 
 Reserve "Do not advance" for real mismatches: claims they could not support, or a requirement they were directly asked about and clearly could not meet. A quiet or nervous candidate who still reasoned soundly is NOT a "do not advance".
 
-Return ONLY a JSON object:
+Use 3 in "ratings" for anything the conversation did not establish.
+
+Return ONLY a JSON object. No comments, no trailing commas, no prose around it:
 {
   "verdict": "Advance" | "Advance with focus" | "Needs discussion" | "Do not advance",
   "overallScore": 0-100,
   "ratings": { "technicalCompetence": 1-5, "systemDesign": 1-5, "communication": 1-5, "authenticity": 1-5 },
-  // ^ legacy summary ratings. Use 3 for anything the conversation did not establish.
   "axisScores": [{ "axis", "score": 1-5, "justification", "evidence": ["verbatim quote"] }],
   "summary": "what this interview established, for a hiring manager",
   "recommendationReason": "1-2 sentences on what to do next and why",

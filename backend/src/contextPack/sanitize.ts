@@ -59,6 +59,15 @@ RULES
 - Prefer situations with a genuine gotcha over descriptive documentation. A doc explaining what a service does is worthless; a doc explaining why something broke is gold.
 - If a document contains no real engineering judgment, return no scenario for it. Empty output is correct and expected.
 
+TAG EACH SCENARIO WITH THE ROLES IT SUITS ("disciplines").
+  backend, frontend, mobile, data, devops, product, design, or "any".
+This matters more than it looks. Without it a connection-pooling scenario reaches
+a product analyst, which measures nothing and makes the interview look broken.
+Be strict: an infrastructure problem is ["backend"] or ["backend","devops"], not
+["any"]. Reserve "any" for situations that genuinely transcend discipline —
+ambiguous requirements, conflicting priorities, communicating during an incident,
+deciding what to cut under time pressure.
+
 For each scenario set difficulty on this scale:
   0 = intern / fresh grad     1 = 1-2 yrs      2 = 3-5 yrs
   3 = senior / 5-8 yrs        4 = staff / 8+ yrs
@@ -76,6 +85,7 @@ Return ONLY a JSON object:
       "weakAnswer": ["what a shallow answer looks like"],
       "strongAnswer": ["what a strong answer identifies"],
       "competencies": ["databases", "reliability"],
+      "disciplines": ["backend"],
       "difficulty": 3
     }
   ]

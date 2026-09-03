@@ -56,8 +56,16 @@ export interface UseNovaSonicInterviewReturn {
   concluded: boolean;
 }
 
-const MIC_SAMPLE_RATE = 16000; // what Nova Sonic accepts
-const SPEAKER_SAMPLE_RATE = 24000; // what Nova Sonic emits
+/**
+ * ONE AudioContext, at whatever rate the hardware runs.
+ *
+ * The original design requested two contexts at two non-native rates (16kHz mic,
+ * 24kHz speaker) and let the browser resample. On 48kHz hardware that is two
+ * device streams with two resamplers contending on the audio thread — a known
+ * Chrome glitching source. Conversion now happens inside the worklets, which
+ * also removes any dependence on the browser honouring a sampleRate hint; it is
+ * free to ignore one and nothing was checking.
+ */
 
 /**
  * Volume meters drive an animated canvas, not a readout — 20fps is smooth to the
@@ -134,8 +142,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const [concluded, setConcluded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const micContextRef = useRef<AudioContext | null>(null);
-  const speakerContextRef = useRef<AudioContext | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const micNodeRef = useRef<AudioWorkletNode | null>(null);
   const playbackNodeRef = useRef<AudioWorkletNode | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -169,10 +176,8 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     playbackNodeRef.current?.disconnect();
     playbackNodeRef.current = null;
 
-    micContextRef.current?.close().catch(() => {});
-    micContextRef.current = null;
-    speakerContextRef.current?.close().catch(() => {});
-    speakerContextRef.current = null;
+    audioContextRef.current?.close().catch(() => {});
+    audioContextRef.current = null;
 
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
@@ -226,14 +231,20 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
       setConnectionState("connecting");
 
-      // Requesting the context at 16kHz lets the browser handle resampling.
-      const micContext = new AudioContext({ sampleRate: MIC_SAMPLE_RATE });
-      micContextRef.current = micContext;
-      await micContext.audioWorklet.addModule("/worklets/mic-processor.js");
+      // No sampleRate hint: take the native rate, convert in the worklets.
+      // latencyHint "interactive" asks for the smallest output buffer the device
+      // will sustain.
+      const audioContext = new AudioContext({ latencyHint: "interactive" });
+      audioContextRef.current = audioContext;
+      if (audioContext.state === "suspended") await audioContext.resume();
 
-      const speakerContext = new AudioContext({ sampleRate: SPEAKER_SAMPLE_RATE });
-      speakerContextRef.current = speakerContext;
-      await speakerContext.audioWorklet.addModule("/worklets/playback-processor.js");
+      await audioContext.audioWorklet.addModule("/worklets/mic-processor.js");
+      await audioContext.audioWorklet.addModule("/worklets/playback-processor.js");
+
+      console.info(
+        `[audio] context ${audioContext.sampleRate}Hz · ` +
+          `output latency ${(audioContext.baseLatency * 1000).toFixed(1)}ms`
+      );
 
       const ws = new WebSocket(backendWsUrl(sessionId));
       wsRef.current = ws;
@@ -272,6 +283,18 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
           case "concluded":
             setConcluded(true);
+            break;
+
+          case "reconnecting":
+            // Bedrock dropped the stream (NGHTTP2_INTERNAL_ERROR /
+            // ModelStreamErrorException are both common). The relay is starting
+            // a fresh one; discard half-played audio so the resumed turn does
+            // not collide with a stale fragment.
+            playbackNodeRef.current?.port.postMessage({ type: "flush" });
+            setIsAiSpeaking(false);
+            setAiVolume(0);
+            setError(null);
+            console.warn(`[audio] voice stream dropped, reconnecting (attempt ${msg.attempt})`);
             break;
 
           case "interrupted": {
@@ -325,9 +348,12 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       });
 
       // --- playback path ---
-      const playbackNode = new AudioWorkletNode(speakerContext, "playback-processor");
+      const playbackNode = new AudioWorkletNode(audioContext, "playback-processor", {
+        numberOfInputs: 0,
+        outputChannelCount: [1],
+      });
       playbackNodeRef.current = playbackNode;
-      playbackNode.connect(speakerContext.destination);
+      playbackNode.connect(audioContext.destination);
       playbackNode.port.onmessage = (e) => {
         const { type, playing, peak } = e.data || {};
         if (type === "playing") {
@@ -352,15 +378,12 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       };
 
       // --- capture path ---
-      const source = micContext.createMediaStreamSource(stream);
-      const micNode = new AudioWorkletNode(micContext, "mic-processor");
+      const source = audioContext.createMediaStreamSource(stream);
+      const micNode = new AudioWorkletNode(audioContext, "mic-processor", {
+        numberOfOutputs: 0,
+      });
       micNodeRef.current = micNode;
       source.connect(micNode);
-      // Route to destination with zero gain: some browsers won't pull from a
-      // worklet that isn't connected to anything downstream.
-      const mute = micContext.createGain();
-      mute.gain.value = 0;
-      micNode.connect(mute).connect(micContext.destination);
 
       micNode.port.onmessage = (e) => {
         const { pcm, peak } = e.data || {};

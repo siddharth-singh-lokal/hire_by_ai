@@ -28,7 +28,20 @@ import { RedFlag, RedFlagType, recordFlag } from "@/lib/sessionStore";
  * rate rather than every frame so it doesn't compete with the audio pipeline.
  */
 
-const DETECTION_INTERVAL_MS = 300; // ~3fps is plenty for presence checks
+/**
+ * detectForVideo is SYNCHRONOUS — it blocks the main thread until results
+ * return. That thread also carries audio chunks from the WebSocket to the
+ * playback worklet, so every detection is a window in which audio cannot be
+ * delivered. Block long enough and the player starves, heard as stuttering.
+ *
+ * Mitigations, in order of effect: detect on a downscaled copy rather than the
+ * full 1280x720 frame; run object detection far less often than face detection
+ * (a phone does not appear for 200ms); never run both in the same frame.
+ */
+const FACE_INTERVAL_MS = 400;
+const OBJECT_INTERVAL_MS = 1600;
+const DETECT_WIDTH = 480;
+const SLOW_DETECTION_MS = 40;
 const ABSENCE_THRESHOLD_MS = 3000;
 const COOLDOWN_MS = 8000; // per flag type, prevents duplicate spam
 
@@ -78,6 +91,10 @@ export function useProctoring({
   const detectorRef = useRef<FaceDetector | null>(null);
   const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const phoneSinceRef = useRef<number | null>(null);
+  const detectCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastFaceRef = useRef(0);
+  const lastObjectRef = useRef(0);
+  const slowWarnedRef = useRef(false);
   const multiFaceSinceRef = useRef<number | null>(null);
   const lookAwaySinceRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -220,26 +237,43 @@ export function useProctoring({
       if (video.readyState < 2 || !video.videoWidth) return;
 
       const now = performance.now();
-      if (now - lastDetectionRef.current < DETECTION_INTERVAL_MS) return;
-      lastDetectionRef.current = now;
+      const doFace = now - lastFaceRef.current >= FACE_INTERVAL_MS;
+      const doObject = !doFace && now - lastObjectRef.current >= OBJECT_INTERVAL_MS;
+      if (!doFace && !doObject) return;
 
-      let count = 0;
+      // Downscale once; both detectors read the smaller frame. Keypoints come
+      // back normalised, so head-pose maths below is unaffected by the scale.
+      if (!detectCanvasRef.current) detectCanvasRef.current = document.createElement("canvas");
+      const dc = detectCanvasRef.current;
+      dc.width = DETECT_WIDTH;
+      dc.height = Math.round(video.videoHeight * (DETECT_WIDTH / video.videoWidth));
+      const dctx = dc.getContext("2d", { willReadFrequently: true });
+      if (!dctx) return;
+      dctx.drawImage(video, 0, 0, dc.width, dc.height);
+      const blockStart = performance.now();
+
+      // Declared out here because the look-away check below needs the keypoints.
+      let count = faceCount;
       let result: any = null;
-      try {
-        // detectForVideo requires a strictly increasing timestamp.
-        result = detector.detectForVideo(video, now);
-        count = result.detections?.length ?? 0;
-      } catch {
-        return; // transient decode errors are not worth flagging
+      if (doFace) {
+        lastFaceRef.current = now;
+        try {
+          // detectForVideo requires a strictly increasing timestamp.
+          result = detector.detectForVideo(dc, now);
+          count = result.detections?.length ?? 0;
+        } catch {
+          return; // transient decode errors are not worth flagging
+        }
       }
 
       setFaceCount(count);
 
       // --- handheld device, sustained ---
       const objectDetector = objectDetectorRef.current;
-      if (objectDetector) {
+      if (doObject && objectDetector) {
+        lastObjectRef.current = now;
         try {
-          const objects = objectDetector.detectForVideo(video, now);
+          const objects = objectDetector.detectForVideo(dc, now);
           const seesPhone = (objects.detections || []).some((d) =>
             (d.categories || []).some(
               (c) =>
@@ -264,6 +298,17 @@ export function useProctoring({
           /* transient decode error — ignore this frame */
         }
       }
+
+      const blocked = performance.now() - blockStart;
+      if (blocked > SLOW_DETECTION_MS && !slowWarnedRef.current) {
+        slowWarnedRef.current = true;
+        console.warn(
+          `[proctoring] detection blocked the main thread for ${blocked.toFixed(0)}ms — ` +
+            `this can starve audio. Raise FACE_INTERVAL_MS or lower DETECT_WIDTH.`
+        );
+      }
+
+      if (!doFace) return; // presence logic only runs on a face pass
 
       if (count > 1) {
         absentSinceRef.current = null;

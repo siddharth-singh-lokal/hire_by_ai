@@ -45,6 +45,25 @@ export interface Scenario {
   strongAnswer: string[];
   /** Competency areas this scenario can assess, e.g. "databases", "reliability". */
   competencies: string[];
+  /**
+   * Which kinds of role this scenario is appropriate for.
+   *
+   * Without this every scenario reaches every candidate, and a Product Analyst
+   * gets asked about connection pool sizing — which measures nothing and makes
+   * the interview look broken. Use "any" only for genuinely role-agnostic
+   * situations (ambiguous requirements, conflicting priorities, incident
+   * communication).
+   */
+  disciplines: (
+    | "backend"
+    | "frontend"
+    | "mobile"
+    | "data"
+    | "devops"
+    | "product"
+    | "design"
+    | "any"
+  )[];
   /** Rough seniority band this suits: 0 = intern, 4 = staff. */
   difficulty: 0 | 1 | 2 | 3 | 4;
 }

@@ -61,11 +61,26 @@ export function extractJson(raw: string): any {
   try {
     return JSON.parse(candidate);
   } catch {
+    // Models occasionally emit JS-flavoured JSON — line comments, trailing
+    // commas — especially when the prompt's schema example contains either.
+    // Repair before giving up, since a whole evaluation is otherwise lost.
+    try {
+      const repaired = candidate
+        .replace(/^\s*\/\/.*$/gm, "")
+        .replace(/,(\s*[}\]])/g, "$1");
+      return JSON.parse(repaired);
+    } catch {
+      /* fall through to brace extraction */
+    }
     // Fall back to the outermost brace pair in case of leading prose.
     const start = candidate.indexOf("{");
     const end = candidate.lastIndexOf("}");
     if (start !== -1 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1));
+      const sliced = candidate
+        .slice(start, end + 1)
+        .replace(/^\s*\/\/.*$/gm, "")
+        .replace(/,(\s*[}\]])/g, "$1");
+      return JSON.parse(sliced);
     }
     throw new Error("Model response contained no parseable JSON object.");
   }

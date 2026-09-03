@@ -107,17 +107,61 @@ export function loadContextPack(): ContextPack | null {
   return pack;
 }
 
-function buildSystemPrompt(pack: ContextPack | null, plan: { projects: number; scenarios: number; gaps: number }, duration: InterviewDuration): string {
-  const packSection = pack
+/**
+ * Infers which discipline a JD is hiring for, so only relevant scenarios and
+ * stack context reach the generator.
+ *
+ * The Context Pack is built from whatever documentation an org has, which here
+ * is entirely backend infrastructure. Handing all of it to every role produced
+ * connection-pooling questions for a Product Analyst — technically grounded,
+ * completely useless, and it makes the whole system look broken to a
+ * non-engineer.
+ */
+function inferDiscipline(jdText: string): string {
+  const jd = jdText.toLowerCase();
+  const score = (words: string[]) =>
+    words.reduce((n, w) => n + (jd.includes(w) ? 1 : 0), 0);
+
+  const scores: Record<string, number> = {
+    data: score(["analyst", "analytics", "sql", "dashboard", "bigquery", "data science", "metrics", "reporting", "etl"]),
+    product: score(["product manager", "product management", "prd", "roadmap", "stakeholder", "user research", "go-to-market", "product analyst"]),
+    design: score(["designer", "figma", "ux", "ui design", "wireframe", "prototype", "visual design"]),
+    frontend: score(["frontend", "front-end", "react", "javascript", "typescript", "css", "browser", "next.js"]),
+    mobile: score(["android", "ios", "kotlin", "swift", "react native", "flutter", "mobile app"]),
+    devops: score(["devops", "sre", "infrastructure", "terraform", "ci/cd", "kubernetes", "observability", "on-call"]),
+    backend: score(["backend", "back-end", "api", "django", "server", "microservice", "database", "distributed", "scalab"]),
+  };
+
+  const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  return best && best[1] > 0 ? best[0] : "any";
+}
+
+function buildSystemPrompt(
+  pack: ContextPack | null,
+  plan: { projects: number; scenarios: number; gaps: number },
+  duration: InterviewDuration,
+  discipline: string
+): string {
+  // Only scenarios tagged for this discipline (or genuinely role-agnostic ones).
+  const relevant = pack
+    ? pack.scenarios.filter((sc) => {
+        const tags = (sc as any).disciplines as string[] | undefined;
+        if (!tags || !tags.length) return discipline === "backend"; // untagged legacy packs are backend
+        return tags.includes(discipline) || tags.includes("any");
+      })
+    : [];
+
+  const packSection =
+    pack && relevant.length
     ? `
 ORG CONTEXT — the environment this role works in.
 ${pack.companyProfile ? `\nCOMPANY PROFILE (public-safe; use for tone and for judging whether someone's way of working would translate here — never quiz them on it):\n${pack.companyProfile}\n` : ""}
-Technical profile:
+Engineering stack (BACKGROUND ONLY — this describes the wider engineering environment. Reference it only where it is genuinely relevant to a ${discipline} role, and never quiz the candidate on technology their role would not touch):
 ${JSON.stringify(pack.stackProfile, null, 2)}
 
-Available scenarios (already sanitized; use these as the raw material for "scenario" questions):
+Available scenarios (already sanitized; filtered to this role's discipline — use as raw material for "scenario" questions):
 ${JSON.stringify(
-  pack.scenarios.map((s) => ({
+  relevant.map((s) => ({
     id: s.id,
     title: s.title,
     stack: s.stack,
@@ -138,6 +182,13 @@ USING THE SCENARIOS
 - Adapt the wording so it reads as a natural interview question, but do not invent technical detail that is not in the scenario.
 - Set "scenarioId" to the scenario you drew from.
 - NEVER imply the candidate should already know this system. Pose it as a problem to reason about, not knowledge to recall.
+`
+    : pack
+    ? `
+COMPANY PROFILE (public-safe; use for tone only, never quiz on it):
+${pack.companyProfile}
+
+NO ROLE-RELEVANT SCENARIOS AVAILABLE. The organisation's documented scenarios are for other disciplines and would be meaningless for a ${discipline} role — do NOT use them. Build scenario questions from the responsibilities and tools named in the JD itself. Keep them concrete and situational rather than trivia.
 `
     : `
 NO ORG CONTEXT AVAILABLE. Generate scenario questions from the technologies named in the JD instead. Keep them concrete and situational rather than trivia.
@@ -286,11 +337,22 @@ export async function generateQuestionBank(opts: {
   const duration = opts.duration ?? 30;
   const plan = DURATION_PLAN[duration];
   const pack = loadContextPack();
+  const discipline = inferDiscipline(opts.jdText);
+
+  const relevantCount = pack
+    ? pack.scenarios.filter((sc) => {
+        const tags = (sc as any).disciplines as string[] | undefined;
+        return !tags?.length ? discipline === "backend" : tags.includes(discipline) || tags.includes("any");
+      }).length
+    : 0;
+  console.log(
+    `[questionBank] discipline "${discipline}" — ${relevantCount} of ${pack?.scenarios.length ?? 0} scenarios relevant`
+  );
 
   const response = await bedrockClient.send(
     new ConverseCommand({
       modelId: GENERATION_MODEL_ID,
-      system: [{ text: buildSystemPrompt(pack, plan, duration) }],
+      system: [{ text: buildSystemPrompt(pack, plan, duration, discipline) }],
       messages: [
         {
           role: "user",
