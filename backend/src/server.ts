@@ -4,15 +4,23 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
 import { attachNovaSonicRelay } from "./novaSonic";
-import { generateQuestionBank, loadContextPack, InterviewDuration } from "./questionBank";
+import { attachGeminiLiveRelay } from "./geminiLive";
+import {
+  generateQuestionBank,
+  loadContextPack,
+  renderInterviewerPrompt,
+  InterviewDuration,
+} from "./questionBank";
 import {
   createSession,
   getSession,
   getSessionByEmail,
   listSessions,
   updateSession,
+  appendTranscript,
 } from "./sessionStore";
 import { gradeSession } from "./grading";
+import { chatComplete, ChatMessage } from "./openrouter";
 
 dotenv.config();
 
@@ -302,13 +310,77 @@ app.post("/api/scorecard/:id/regrade", async (req: Request, res: Response) => {
   return res.json({ success: true, status: "grading" });
 });
 
+// Text interview turn (OpenRouter). A stable, typed alternative to the Nova
+// Sonic voice loop: the interviewer runs on the same question-bank prompt, the
+// transcript is stored server-side exactly like the voice path, and grading is
+// shared. Stateless per call — the prompt is rebuilt from the stored transcript,
+// so it survives restarts. Send an empty `text` on the first call to get the
+// opening line.
+app.post("/api/interview/:id/message", async (req: Request, res: Response) => {
+  try {
+    const session = getSession(String(req.params.id));
+    if (!session) {
+      return res.status(404).json({ error: "NOT_FOUND", message: "No such interview." });
+    }
+
+    const candidateText = String(req.body?.text || "").trim();
+
+    if (session.status === "ready") {
+      updateSession(session.id, { status: "in_progress", startedAt: Date.now() });
+    }
+
+    // Record the candidate's message first, so it is part of the prompt and the
+    // graded transcript. Empty on the opening call.
+    if (candidateText) {
+      appendTranscript(session.id, {
+        sender: "candidate",
+        text: candidateText,
+        timestamp: Date.now(),
+      });
+    }
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: renderInterviewerPrompt(session.bank, session.candidateName) },
+    ];
+    for (const t of session.transcripts) {
+      messages.push({ role: t.sender === "candidate" ? "user" : "assistant", content: t.text });
+    }
+    if (session.transcripts.length === 0) {
+      messages.push({
+        role: "user",
+        content: "[The interview is starting now. Greet me by name and ask your first question.]",
+      });
+    }
+
+    const reply = await chatComplete(messages, { temperature: 0.7, maxTokens: 300 });
+    appendTranscript(session.id, { sender: "interviewer", text: reply, timestamp: Date.now() });
+
+    return res.json({ reply });
+  } catch (error: any) {
+    console.error("[Text interview] Failed:", error?.message);
+    return res.status(500).json({
+      error: "TEXT_TURN_FAILED",
+      message: error?.message || "Failed to get a reply from the interviewer.",
+    });
+  }
+});
+
 const httpServer = createServer(app);
 
-// Nova Sonic speech-to-speech relay shares the HTTP port at /ws/interview.
-attachNovaSonicRelay(httpServer);
+// Speech-to-speech relay shares the HTTP port at /ws/interview. Provider is
+// selected with VOICE_PROVIDER: "gemini" (Gemini Live) or "sonic" (Nova Sonic,
+// default). Both speak the same browser protocol, so the client is unchanged.
+const VOICE_PROVIDER = (process.env.VOICE_PROVIDER || "sonic").toLowerCase();
+if (VOICE_PROVIDER === "gemini") {
+  attachGeminiLiveRelay(httpServer);
+} else {
+  attachNovaSonicRelay(httpServer);
+}
 
 httpServer.listen(PORT, () => {
   console.log(`[Round-0 Backend] Server running on http://localhost:${PORT}`);
   console.log(`[Round-0 Backend] Voice relay at ws://localhost:${PORT}/ws/interview`);
-  console.log(`[Round-0 Backend] Region ${AWS_REGION} | Voice ${SONIC_MODEL_ID}`);
+  console.log(
+    `[Round-0 Backend] Region ${AWS_REGION} | Voice provider: ${VOICE_PROVIDER === "gemini" ? "Gemini Live" : SONIC_MODEL_ID}`
+  );
 });

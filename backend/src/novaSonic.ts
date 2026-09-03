@@ -198,6 +198,14 @@ const RECOVERABLE = /ModelStreamError|ServiceUnavailable|Throttl|InternalServer|
  */
 const MAX_STREAM_ATTEMPTS = 5;
 
+/**
+ * Total drops in one session before we stop retrying and hand off to the client
+ * (which offers a manual Rejoin). Because `attempt` resets on every candidate
+ * turn, a flaky stream would otherwise reconnect — and re-prime audio and
+ * re-apologise — indefinitely.
+ */
+const MAX_TOTAL_DROPS = 10;
+
 /** How much recent conversation a resumed stream is shown. */
 const RESUME_TAIL_LINES = 12;
 
@@ -490,6 +498,9 @@ export function attachNovaSonicRelay(server: Server): void {
      * "yeah") — so after one drop it told the interviewer both questions were
      * done and she skipped straight to a scenario she had never asked.
      */
+    // Resume SILENTLY. The reconnect is a background mechanism — the candidate
+    // must never hear about it. No "sorry, we lost the connection", no "let's
+    // pick up where we left off", not once, not ever.
     const buildResumeNote = (): string => {
       const name = prepared.candidateName;
       const tail = prepared.transcripts
@@ -497,15 +508,17 @@ export function attachNovaSonicRelay(server: Server): void {
         .map((t) => `${t.sender === "candidate" ? name : "You"}: ${t.text}`)
         .join("\n");
       return (
-        `The call dropped and has just been restored. You are MID-INTERVIEW. ` +
-        `Do NOT greet ${name} again, do NOT reintroduce yourself, and do NOT start from the first question.\n\n` +
+        `You are MID-INTERVIEW and the voice stream was just re-established behind the scenes. ` +
+        `The candidate must NOT notice anything happened: do NOT greet ${name} again, do NOT reintroduce ` +
+        `yourself, do NOT restart from the first question, and — most importantly — do NOT mention, ` +
+        `reference, or apologise for any connection problem. NEVER say things like "sorry, we lost the ` +
+        `connection", "we had a hiccup", or "let's pick up where we left off".\n\n` +
         (tail
           ? `The end of the conversation so far, verbatim:\n${tail}\n\n`
           : `You had only just said hello; nothing has been asked yet.\n\n`) +
-        `When ${name} next speaks, say one short line acknowledging the drop ("sorry, we lost the connection for a moment"), ` +
-        `then pick up exactly where this left off: if a question was asked and not yet answered, ask it again briefly; ` +
-        `otherwise move to the next question in your list that does not appear above. ` +
-        `Any question not visible above has NOT been asked yet.`
+        `Simply continue as if nothing happened: if a question was asked and not yet answered, wait for ` +
+        `the candidate or gently re-ask it; otherwise move to the next question in your list that does not ` +
+        `appear above. Any question not visible above has NOT been asked yet.`
       );
     };
 
@@ -607,23 +620,34 @@ export function attachNovaSonicRelay(server: Server): void {
           // Counted per session so the grader and the recruiter can tell a
           // broken call from a weak candidate.
           const drops = recordStreamDrop(prepared.id);
-          console.warn(
-            `[Sonic] ${prepared.id} — stream dropped (${label}). ` +
-              `Reconnecting, attempt ${attempt}/${MAX_STREAM_ATTEMPTS} (drop #${drops} this session).`
+
+          // A call that has dropped this many times is not usable. Stop looping
+          // (the per-candidate-turn `attempt` reset would otherwise never let it
+          // give up) and fall through to the error path, which lets the client
+          // offer a manual Rejoin.
+          if (drops <= MAX_TOTAL_DROPS) {
+            console.warn(
+              `[Sonic] ${prepared.id} — stream dropped (${label}). ` +
+                `Reconnecting, attempt ${attempt}/${MAX_STREAM_ATTEMPTS} (drop #${drops} this session).`
+            );
+
+            // Tell the client so it can flush stale audio and show a brief notice
+            // rather than sitting in silence wondering.
+            send({ type: "reconnecting", attempt });
+
+            // Sonic has no memory of the dropped stream. Hand it back what has
+            // already been covered so it continues instead of reintroducing itself.
+            const resumeNote = buildResumeNote();
+
+            session = newSonicSession();
+            // Exponential-ish backoff; Bedrock faults often clear within a second.
+            await new Promise((r) => setTimeout(r, 400 * attempt));
+            return startStream(resumeNote);
+          }
+
+          console.error(
+            `[Sonic] ${prepared.id} — giving up after ${drops} total drops this session.`
           );
-
-          // Tell the client so it can flush stale audio and show a brief notice
-          // rather than sitting in silence wondering.
-          send({ type: "reconnecting", attempt });
-
-          // Sonic has no memory of the dropped stream. Hand it back what has
-          // already been covered so it continues instead of reintroducing itself.
-          const resumeNote = buildResumeNote();
-
-          session = newSonicSession();
-          // Exponential-ish backoff; Bedrock faults often clear within a second.
-          await new Promise((r) => setTimeout(r, 400 * attempt));
-          return startStream(resumeNote);
         }
 
         console.error(`[Sonic] ${prepared.id} — stream failed: ${label}`);

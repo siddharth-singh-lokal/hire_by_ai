@@ -196,3 +196,14 @@ export async function fetchScorecard(sessionId: string): Promise<ScorecardRespon
 export function regradeInterview(sessionId: string): Promise<{ success: boolean }> {
   return post(`/api/scorecard/${sessionId}/regrade`, {});
 }
+
+/**
+ * One turn of the TEXT interview (OpenRouter-backed). Send an empty string to
+ * get the interviewer's opening line; otherwise send the candidate's message.
+ */
+export function sendInterviewMessage(
+  sessionId: string,
+  text: string
+): Promise<{ reply: string }> {
+  return post(`/api/interview/${sessionId}/message`, { text });
+}
