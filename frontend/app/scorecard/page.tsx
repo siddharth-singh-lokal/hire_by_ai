@@ -2,6 +2,18 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { IntegrityAuditPanel } from "@/components/IntegrityAuditPanel";
+
+/** Proctoring metadata written by the interview page when the session ends. */
+function readStoredRedFlags(): any[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(localStorage.getItem("interview_red_flags") || "[]");
+  } catch {
+    return [];
+  }
+}
+
 import {
   Award,
   CheckCircle2,
@@ -123,6 +135,8 @@ export default function ScorecardPage() {
           body: JSON.stringify({
             transcripts: transcriptsToEval,
             durationSeconds: duration,
+            // Proctoring incidents inform the authenticity rating server-side.
+            redFlags: readStoredRedFlags(),
             apiKey: key,
           }),
         });
@@ -563,6 +577,9 @@ export default function ScorecardPage() {
         {/* TAB 1: EXECUTIVE SUMMARY */}
         {activeTab === "overview" && (
           <div className="space-y-6">
+            {/* Proctoring audit: recording + incident timeline */}
+            <IntegrityAuditPanel />
+
             {/* Committee Summary */}
             <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">

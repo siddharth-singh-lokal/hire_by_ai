@@ -1,143 +1,126 @@
 # Round-0 AI Technical Interview System
 
-An end-to-end, sub-second latency, two-way conversational AI technical interview platform built for high-signal candidate assessment.
+A prototype two-way conversational AI technical interview platform, with live proctoring and a recruiter audit trail. Runs entirely on **Amazon Bedrock** — no OpenAI key required.
 
-This project is decoupled into **two independent applications**:
-1. **`backend/`**: Dedicated Node.js & TypeScript Express server (OpenAI Realtime session broker & `gpt-4o-mini` evaluation bar raiser).
-2. **`frontend/`**: Next.js 14 client application (WebRTC direct audio connection, audio-reactive visualizer, live webcam feed, rolling transcript, and recruiter scorecard).
-
----
-
-## 🏗️ Architecture & Communication
-
-```
-+------------------------------------------------------------------------------------+
-|                         FRONTEND (Next.js - Port 3030)                             |
-|                                                                                    |
-|  - Live Webcam Feed (`getUserMedia`)                                               |
-|  - Audio-Reactive Visualizer (`AnalyserNode` + Canvas Waveforms)                    |
-|  - Real-Time Rolling Transcript (`RTCDataChannel`)                                 |
-|  - Scorecard Dashboard (`/scorecard`)                                              |
-+------------------------------------------------------------------------------------+
-       |                                                  |
-       | 1. POST http://localhost:4000/api/session        | 2. Direct WebRTC PeerConnection
-       |    (Requests ephemeral client token)             |    (Sub-300ms Opus audio)
-       v                                                  v
-+----------------------------------------+    +--------------------------------------+
-|     BACKEND (Express - Port 4000)      |    |        OPENAI REALTIME API           |
-|                                        |    |     `gpt-4o-realtime-preview`        |
-| - Secure OpenAI Session Broker         |    |                                      |
-| - Injects Sarah Chen Lead Architect    |    | - Server VAD with live interruption  |
-| - Automated Whisper-1 Candidate ASR    |    | - Whisper-1 candidate transcription  |
-| - POST /api/evaluate Scorecard Engine  |    | - Full-duplex direct audio streaming |
-+----------------------------------------+    +--------------------------------------+
-```
+Decoupled into two applications:
+1. **`backend/`** — Express server: Nova Sonic speech-to-speech relay + Claude evaluation engine.
+2. **`frontend/`** — Next.js 14 client: interview room, MediaPipe proctoring, session recording, recruiter scorecard.
 
 ---
 
-## 📁 Project Structure
+## 🏗️ Architecture
 
 ```
-hire_by_ai/
-├── backend/                        # Dedicated Backend Application (Port 4000)
-│   ├── src/
-│   │   ├── server.ts               # Express server, CORS, /api/session & /api/evaluate
-│   │   ├── resumeData.ts           # Hardcoded Alex Doe profile, rubrics & prompt generator
-│   │   └── scorecardTypes.ts       # Structured JSON evaluation schema
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── .env.example
-│
-├── frontend/                       # Dedicated Frontend Application (Port 3030)
-│   ├── app/
-│   │   ├── interview/page.tsx      # Dual-pane live WebRTC video call room
-│   │   ├── scorecard/page.tsx      # Recruiter scorecard report with metric gauges
-│   │   ├── page.tsx                # Hardware readiness test & candidate lobby
-│   │   ├── layout.tsx
-│   │   └── globals.css
-│   ├── components/
-│   │   └── AudioReactiveVisualizer.tsx # Multi-ring glowing orb + dynamic canvas wave
-│   ├── hooks/
-│   │   └── useWebRTCInterview.ts   # WebRTC PeerConnection, DataChannel & audio meters
-│   ├── lib/
-│   │   ├── resumeData.ts           # Shared candidate resume constants
-│   │   ├── scorecardTypes.ts       # Scorecard TypeScript interfaces
-│   │   └── utils.ts
-│   ├── package.json
-│   ├── next.config.mjs
-│   ├── tailwind.config.js
-│   ├── tsconfig.json
-│   └── .env.example
-│
-├── package.json                    # Root orchestrator scripts
-└── README.md
++---------------------------------------------------------------------------+
+|                     FRONTEND (Next.js - Port 3030)                        |
+|                                                                           |
+|  - AudioWorklet mic capture (16kHz PCM16) + playback queue (24kHz)         |
+|  - MediaPipe FaceDetector proctoring (WASM, vendored locally)              |
+|  - MediaRecorder session capture -> in-memory blob                         |
+|  - Audio-reactive visualizer, rolling transcript, recruiter scorecard      |
++---------------------------------------------------------------------------+
+       |                                              |
+       | WebSocket /ws/interview                      | POST /api/evaluate
+       v                                              v
++---------------------------------------------------------------------------+
+|                      BACKEND (Express - Port 4000)                        |
+|                                                                           |
+|  Nova Sonic relay: browsers can't speak HTTP/2 bidirectional streams, so   |
+|  this bridges WebSocket <-> InvokeModelWithBidirectionalStream.            |
++---------------------------------------------------------------------------+
+       |                                              |
+       v                                              v
++------------------------------------+  +---------------------------------------+
+|  amazon.nova-2-sonic-v1:0          |  |  us.anthropic.claude-sonnet-4-5        |
+|  SPEECH in -> SPEECH + TEXT out    |  |  Structured JSON scorecard             |
+|  Server-side VAD, barge-in support |  |  Reads transcript + proctoring flags   |
++------------------------------------+  +---------------------------------------+
 ```
+
+**Two model-ID gotchas that will cost you an hour if you miss them:**
+- Claude requires the `us.` inference-profile prefix. Bare `anthropic.claude-*` IDs fail with *"on-demand throughput isn't supported"*.
+- Nova Sonic is the opposite — ON_DEMAND only, bare model ID, no inference profile exists.
 
 ---
 
-## ⚡ Quickstart Guide
+## ⚡ Quickstart
 
-### 1. Environment Setup
+### 1. AWS credentials
 
-#### Backend (`backend/.env`):
+Everything resolves through the standard AWS provider chain. Either set a profile:
+
 ```bash
-cd backend
-cp .env.example .env
-```
-Add your OpenAI key:
-```env
+# backend/.env
 PORT=4000
-OPENAI_API_KEY=sk-proj-your-openai-api-key-here
+AWS_PROFILE=workshop
+AWS_REGION=us-west-2
 ```
 
-#### Frontend (`frontend/.env.local`):
+…or export Workshop Studio credentials directly (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`).
+
+Verify Bedrock reachability before starting:
+
 ```bash
-cd frontend
-cp .env.example .env.local
+aws bedrock list-foundation-models --region us-west-2 \
+  --query "modelSummaries[?contains(modelId,'sonic')].[modelId,modelLifecycle.status]" --output text
 ```
-Configured by default to point to the backend:
-```env
-NEXT_PUBLIC_BACKEND_URL=http://localhost:4000
+
+### 2. Run
+
+```bash
+npm run dev:backend    # Express + Sonic relay on :4000
+npm run dev:frontend   # Next.js on :3030
 ```
-*(Note: You can also supply the OpenAI API key directly inside the frontend interview room modal).*
+
+Open **http://localhost:3030**, grant camera and mic, and start the interview.
 
 ---
 
-### 2. Running the Applications
+## 🎙️ How the voice loop works
 
-#### Option A: Run Both from Root
-```bash
-# In hire_by_ai/
-npm run dev:backend    # Terminal 1: Starts Express on http://localhost:4000
-npm run dev:frontend   # Terminal 2: Starts Next.js on http://localhost:3030
-```
+Nova Sonic decides the candidate has finished speaking using **server-side voice activity detection**. The mic therefore streams **continuously, including silence** — muting zeroes the samples inside the worklet rather than stopping the stream. Cutting the stream entirely means Sonic never detects end-of-turn and never replies.
 
-#### Option B: Run Individually
+Barge-in is supported: interrupting mid-answer makes Sonic emit an `INTERRUPTED` event, and the client flushes its playback queue so the interviewer stops mid-sentence.
 
-**Backend**:
-```bash
-cd backend
-npm install
-npm run dev     # Starts on http://localhost:4000
-```
-
-**Frontend**:
-```bash
-cd frontend
-npm install
-npm run dev     # Starts on http://localhost:3030
-```
+Measured latency, end-of-speech to first audio byte: **~1.8s**.
 
 ---
 
-## 🌐 Endpoints & Pages
+## 🛡️ Proctoring
+
+Runs client-side via MediaPipe FaceDetector at ~3fps, throttled so it doesn't compete with the audio pipeline. WASM and the `blaze_face_short_range` model are vendored into `public/` so the demo doesn't depend on a CDN.
+
+| Flag | Trigger |
+|---|---|
+| `MULTIPLE_FACES_DETECTED` | More than one face in frame |
+| `CANDIDATE_ABSENT` | Zero faces for >3s (debounced) |
+| `TAB_SWITCH_DETECTED` | `visibilitychange` / window `blur` |
+
+Each flag captures a JPEG frame as evidence, with an 8s per-type cooldown to prevent duplicate spam. Flags feed the scorecard's **authenticity** rating but are explicitly excluded from technical scoring.
+
+**Phone detection from the original spec is not implemented.** Object detection for handheld devices false-positives on mugs, notebooks and hands — a proctoring tool that cries wolf is worse than one that stays quiet.
+
+---
+
+## ⚠️ Prototype limitations
+
+These are deliberate scope cuts, not oversights:
+
+- **No S3.** The recording and flag snapshots are object URLs in a module-level store (`lib/sessionStore.ts`). They survive client-side navigation to `/scorecard` but **not a hard refresh or a new tab**, and nothing is shareable with a real recruiter. Swapping in S3 means replacing two functions with presigned PUTs; nothing else changes.
+- **No session persistence.** Transcripts pass through `localStorage`; there is no database.
+- **Credentials are local.** Workshop Studio credentials expire when the event ends, and the AWS profile only exists on the machine that configured it. Deploying anywhere requires real IAM.
+- **Claude grades hard.** Sonnet 4.5 will reject a thin transcript that older models passed. Tune `CANDIDATE_RESUME.rubric` before demoing.
+
+---
+
+## 🌐 Endpoints
 
 ### Backend (`http://localhost:4000`)
-- `GET /health` - Service health and OpenAI key configuration status.
-- `POST /api/session` - Requests ephemeral token from OpenAI Realtime API.
-- `POST /api/evaluate` - Evaluates interview transcripts with `gpt-4o-mini`.
+- `GET /health` — service status, region, and active model IDs.
+- `WS /ws/interview` — Nova Sonic speech-to-speech relay.
+- `POST /api/evaluate` — Claude scorecard from transcript + proctoring flags. Falls back to a deterministic rubric matcher if Bedrock is unreachable, so a demo never hard-fails.
 
 ### Frontend (`http://localhost:3030`)
-- **Lobby & Pre-flight**: [http://localhost:3030](http://localhost:3030)
-- **Live Interview Stage**: [http://localhost:3030/interview](http://localhost:3030/interview)
-- **Recruiter Scorecard**: [http://localhost:3030/scorecard](http://localhost:3030/scorecard)
+- `/` — hardware readiness check and candidate lobby.
+- `/interview` — live interview room with proctoring overlay and flag ticker.
+- `/scorecard` — recruiter scorecard with integrity audit, recording playback, and clickable flag timeline.

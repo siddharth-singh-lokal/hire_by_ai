@@ -1,8 +1,12 @@
 import express, { Request, Response } from "express";
+import { createServer } from "http";
 import cors from "cors";
 import dotenv from "dotenv";
+import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { CANDIDATE_RESUME, generateInterviewerSystemPrompt } from "./resumeData";
 import { ScorecardEvaluation } from "./scorecardTypes";
+import { bedrockClient, EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION, extractJson } from "./bedrock";
+import { attachNovaSonicRelay } from "./novaSonic";
 
 dotenv.config();
 
@@ -24,7 +28,9 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     service: "round0-ai-backend",
-    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    region: AWS_REGION,
+    evaluationModel: EVALUATION_MODEL_ID,
+    voiceModel: SONIC_MODEL_ID,
     timestamp: new Date().toISOString(),
   });
 });
@@ -33,7 +39,9 @@ app.get("/api/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     service: "round0-ai-backend",
-    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    region: AWS_REGION,
+    evaluationModel: EVALUATION_MODEL_ID,
+    voiceModel: SONIC_MODEL_ID,
     timestamp: new Date().toISOString(),
   });
 });
@@ -122,18 +130,7 @@ app.post("/api/session", async (req: Request, res: Response) => {
 // 2. Evaluation Engine: Produces candidate scorecard using gpt-4o-mini
 app.post("/api/evaluate", async (req: Request, res: Response) => {
   try {
-    const { transcripts = [], durationSeconds = 0 } = req.body;
-
-    let apiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!apiKey && req.body?.apiKey) {
-      apiKey = String(req.body.apiKey).trim();
-    }
-    if (!apiKey) {
-      const headerKey = req.headers["x-openai-api-key"];
-      if (typeof headerKey === "string" && headerKey.trim()) {
-        apiKey = headerKey.trim();
-      }
-    }
+    const { transcripts = [], durationSeconds = 0, redFlags = [] } = req.body;
 
     const formattedTranscript = transcripts
       .map(
@@ -215,8 +212,9 @@ app.post("/api/evaluate", async (req: Request, res: Response) => {
       return res.json({ success: true, evaluation: fallbackEvaluation });
     }
 
-    // If API Key is available, use gpt-4o-mini with structured JSON
-    if (apiKey) {
+    // Evaluate with Claude on Bedrock. Credentials come from the AWS provider
+    // chain, so there is no key to check before attempting the call.
+    {
       const systemPrompt = `You are a Principal Technical Recruiting Bar Raiser and Lead Architect evaluating a Round-0 interview transcript for a candidate:
 Candidate: ${CANDIDATE_RESUME.name}
 Role: ${CANDIDATE_RESUME.title} (${CANDIDATE_RESUME.experienceYears} Years Experience)
@@ -279,49 +277,67 @@ Strictly output a valid JSON object matching this schema:
   ]
 }
 
-Ensure your evaluation is rigorous, objective, and quotes the candidate directly.`;
+Ensure your evaluation is rigorous, objective, and quotes the candidate directly.
+Respond with the JSON object only — no prose, no markdown fences.`;
 
-      const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          response_format: { type: "json_object" },
+      // Proctoring incidents are advisory context for the authenticity rating.
+      // They are integrity signals, not evidence about technical ability, so the
+      // model is told not to let them drive the technical scores.
+      const proctoringContext = redFlags.length
+        ? `\n\nProctoring incidents recorded during this session (integrity signal only — ` +
+          `factor these into the "authenticity" rating and mention them in redFlags where ` +
+          `warranted, but do NOT let them lower the technical or system-design scores):\n` +
+          redFlags
+            .map((f: any) => `- [${f.type}] at ${f.timeInSeconds}s: ${f.description}`)
+            .join("\n")
+        : "";
+
+      try {
+        const command = new ConverseCommand({
+          modelId: EVALUATION_MODEL_ID,
+          system: [{ text: systemPrompt }],
           messages: [
-            { role: "system", content: systemPrompt },
             {
               role: "user",
-              content: `Here is the full recorded transcript of the interview session:\n\n${formattedTranscript}`,
+              content: [
+                {
+                  text: `Here is the full recorded transcript of the interview session:\n\n${formattedTranscript}${proctoringContext}`,
+                },
+              ],
             },
           ],
-          temperature: 0.3,
-        }),
-      });
+          inferenceConfig: { maxTokens: 4096, temperature: 0.3 },
+        });
 
-      if (!aiResponse.ok) {
-        const errorText = await aiResponse.text();
-        console.error("Evaluation model failed:", errorText);
-        throw new Error(`OpenAI evaluation API returned status ${aiResponse.status}`);
+        const aiData = await bedrockClient.send(command);
+        const content = aiData.output?.message?.content?.[0]?.text;
+
+        if (!content) {
+          throw new Error("Bedrock returned an empty evaluation response.");
+        }
+
+        const parsedEvaluation: ScorecardEvaluation = extractJson(content);
+        parsedEvaluation.durationSeconds = durationSeconds;
+        parsedEvaluation.evaluatedAt = new Date().toISOString();
+        parsedEvaluation.evaluationMode = "realtime_llm";
+        parsedEvaluation.modelUsed = `${EVALUATION_MODEL_ID} (Amazon Bedrock, ${AWS_REGION})`;
+
+        return res.json({
+          success: true,
+          evaluation: parsedEvaluation,
+        });
+      } catch (bedrockError: any) {
+        // Expired workshop credentials are the most likely cause here. Rather
+        // than 500 mid-demo, drop through to the deterministic rubric matcher.
+        console.error(
+          "[Evaluate] Bedrock call failed, falling back to deterministic matcher:",
+          bedrockError?.name,
+          bedrockError?.message
+        );
       }
-
-      const aiData = (await aiResponse.json()) as any;
-      const content = aiData.choices[0]?.message?.content;
-      const parsedEvaluation: ScorecardEvaluation = JSON.parse(content);
-      parsedEvaluation.durationSeconds = durationSeconds;
-      parsedEvaluation.evaluatedAt = new Date().toISOString();
-      parsedEvaluation.evaluationMode = "realtime_llm";
-      parsedEvaluation.modelUsed = "gpt-4o-mini (OpenAI Real-Time Evaluation)";
-
-      return res.json({
-        success: true,
-        evaluation: parsedEvaluation,
-      });
     }
 
-    // Deterministic Fallback if API key is not supplied
+    // Deterministic Fallback if Bedrock is unreachable
     const fullText = transcripts.map((t: any) => t.text).join(" ").toLowerCase();
     const mentionsRedis = fullText.includes("redis");
     const mentionsPostgres = fullText.includes("postgres") || fullText.includes("advisory") || fullText.includes("lock");
@@ -395,7 +411,7 @@ Ensure your evaluation is rigorous, objective, and quotes the candidate directly
       durationSeconds: durationSeconds || 240,
       evaluatedAt: new Date().toISOString(),
       evaluationMode: "offline_simulation",
-      modelUsed: "Deterministic Rubric Matcher (No OPENAI_API_KEY Configured)",
+      modelUsed: "Deterministic Rubric Matcher (Bedrock Unreachable)",
     };
 
     return res.json({ success: true, evaluation: deterministicEvaluation });
@@ -408,6 +424,13 @@ Ensure your evaluation is rigorous, objective, and quotes the candidate directly
   }
 });
 
-app.listen(PORT, () => {
+const httpServer = createServer(app);
+
+// Nova Sonic speech-to-speech relay shares the HTTP port at /ws/interview.
+attachNovaSonicRelay(httpServer);
+
+httpServer.listen(PORT, () => {
   console.log(`[Round-0 Backend] Server running on http://localhost:${PORT}`);
+  console.log(`[Round-0 Backend] Voice relay at ws://localhost:${PORT}/ws/interview`);
+  console.log(`[Round-0 Backend] Region ${AWS_REGION} | Voice ${SONIC_MODEL_ID}`);
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Mic,
@@ -21,7 +21,10 @@ import {
   CheckCircle2,
   RefreshCw,
 } from "lucide-react";
-import { useWebRTCInterview } from "@/hooks/useWebRTCInterview";
+import { useNovaSonicInterview } from "@/hooks/useNovaSonicInterview";
+import { useProctoring } from "@/hooks/useProctoring";
+import { useSessionRecorder } from "@/hooks/useSessionRecorder";
+import { startSession, RED_FLAG_LABELS } from "@/lib/sessionStore";
 import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
 import { CANDIDATE_RESUME } from "@/lib/resumeData";
 
@@ -43,7 +46,7 @@ export default function InterviewPage() {
     toggleMute,
     toggleVideo,
     cancelAiResponse,
-  } = useWebRTCInterview();
+  } = useNovaSonicInterview();
 
   // Video element ref for candidate camera stream
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -55,10 +58,43 @@ export default function InterviewPage() {
   const [customApiKey, setCustomApiKey] = useState("");
   const [showEndModal, setShowEndModal] = useState(false);
   const [hasStartedOnce, setHasStartedOnce] = useState(false);
+  const [isFinalising, setIsFinalising] = useState(false);
 
   // 40:00 Countdown Timer (2400 seconds)
   const TOTAL_INTERVIEW_SECONDS = 40 * 60;
   const [secondsRemaining, setSecondsRemaining] = useState(TOTAL_INTERVIEW_SECONDS);
+
+  // --- Proctoring & recording ---------------------------------------------
+  const isLive = connectionState === "active";
+  const interviewStartedAtRef = useRef<number>(0);
+
+  // Elapsed seconds into the recording, used to timestamp red flags so the
+  // recruiter can jump straight to the moment in the video.
+  const getElapsedSeconds = useCallback(() => {
+    if (!interviewStartedAtRef.current) return 0;
+    return Math.round((Date.now() - interviewStartedAtRef.current) / 1000);
+  }, []);
+
+  const {
+    start: startRecording,
+    stop: stopRecording,
+    isRecording,
+  } = useSessionRecorder();
+
+  const {
+    flags: redFlags,
+    faceCount,
+    isReady: proctoringReady,
+    error: proctoringError,
+  } = useProctoring({ videoRef, enabled: isLive, getElapsedSeconds });
+
+  // Start the recorder once the stream is live.
+  useEffect(() => {
+    if (isLive && localStream && !isRecording) {
+      interviewStartedAtRef.current = Date.now();
+      startRecording(localStream);
+    }
+  }, [isLive, localStream, isRecording, startRecording]);
 
   // Attach local stream to candidate video element
   useEffect(() => {
@@ -138,22 +174,44 @@ export default function InterviewPage() {
   // Handle Start
   const handleLaunch = async (keyToUse?: string) => {
     setHasStartedOnce(true);
+    startSession();
     await startInterview(keyToUse || customApiKey || undefined);
   };
 
   // Handle End Interview and proceed to scorecard
-  const handleConfirmEnd = () => {
+  const handleConfirmEnd = async () => {
+    setIsFinalising(true);
+
+    // Order matters: flush the recording into the session store before tearing
+    // down the stream, otherwise the tracks are already dead when it stops.
+    try {
+      await stopRecording();
+    } catch (e) {
+      console.error("Recorder stop failed:", e);
+    }
+
     endInterview();
-    // Cache transcripts and duration in localStorage for Scorecard retrieval
+
+    // Transcripts and flags hand off to the scorecard. Flags also live in the
+    // session store (with their snapshots); localStorage carries the plain
+    // metadata so the evaluation request survives independently of the blobs.
     try {
       localStorage.setItem("interview_transcripts", JSON.stringify(transcripts));
       localStorage.setItem("interview_duration", String(elapsedSeconds));
-      if (customApiKey) {
-        localStorage.setItem("openai_api_key", customApiKey);
-      }
+      localStorage.setItem(
+        "interview_red_flags",
+        JSON.stringify(
+          redFlags.map((f) => ({
+            type: f.type,
+            description: f.description,
+            timeInSeconds: f.timeInSeconds,
+          }))
+        )
+      );
     } catch (e) {
       console.error("Storage error:", e);
     }
+
     router.push("/scorecard");
   };
 
@@ -334,6 +392,52 @@ export default function InterviewPage() {
                   />
                 )}
 
+                {/* Proctoring status overlay */}
+                {isLive && (
+                  <div className="absolute top-3 left-3 flex flex-col gap-2 items-start z-10">
+                    <div
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium backdrop-blur-md border ${
+                        redFlags.length > 0
+                          ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                          : proctoringReady
+                          ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                          : "bg-slate-700/40 border-slate-600/50 text-slate-300"
+                      }`}
+                    >
+                      {redFlags.length > 0 ? (
+                        <>
+                          <AlertCircle className="w-3 h-3" />
+                          {redFlags.length} Integrity{" "}
+                          {redFlags.length === 1 ? "Flag" : "Flags"}
+                        </>
+                      ) : proctoringReady ? (
+                        <>
+                          <ShieldCheck className="w-3 h-3" />
+                          Secure
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          Starting proctor…
+                        </>
+                      )}
+                    </div>
+
+                    {isRecording && (
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-red-500/15 border border-red-500/40 text-red-300 backdrop-blur-md">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                        Recording
+                      </div>
+                    )}
+
+                    {proctoringReady && faceCount > 1 && (
+                      <div className="px-2.5 py-1 rounded-full text-[11px] font-medium bg-red-500/20 border border-red-500/50 text-red-200 backdrop-blur-md">
+                        {faceCount} faces in frame
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Camera Off / Standby Placeholder */}
                 {(isVideoMuted || connectionState === "idle") && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900 text-slate-400">
@@ -493,13 +597,69 @@ export default function InterviewPage() {
             </div>
           </div>
 
+          {/* Live Red Flag Ticker */}
+          <div className="border-b border-slate-800/60">
+            <div className="px-4 py-2 bg-slate-950/60 border-b border-slate-800/60 flex items-center justify-between">
+              <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                Integrity Flags ({redFlags.length})
+              </span>
+              <span
+                className={`text-[10px] font-mono ${
+                  proctoringError
+                    ? "text-red-400"
+                    : proctoringReady
+                    ? "text-emerald-400"
+                    : "text-slate-500"
+                }`}
+              >
+                {proctoringError ? "Proctor Error" : proctoringReady ? "Monitoring" : "Idle"}
+              </span>
+            </div>
+
+            <div className="max-h-40 overflow-y-auto p-3 space-y-2">
+              {proctoringError ? (
+                <p className="text-[11px] text-red-400/80 px-1">{proctoringError}</p>
+              ) : redFlags.length === 0 ? (
+                <p className="text-[11px] text-slate-500 px-1">
+                  {proctoringReady
+                    ? "No violations detected."
+                    : "Proctoring starts when the interview begins."}
+                </p>
+              ) : (
+                [...redFlags].reverse().map((flag) => (
+                  <div
+                    key={flag.id}
+                    className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/5 border border-amber-500/20"
+                  >
+                    {flag.snapshotUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={flag.snapshotUrl}
+                        alt={RED_FLAG_LABELS[flag.type]}
+                        className="w-12 h-9 object-cover rounded border border-amber-500/30 shrink-0"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold text-amber-300 truncate">
+                        {RED_FLAG_LABELS[flag.type]}
+                      </p>
+                      <p className="text-[10px] text-slate-400 font-mono">
+                        {formatTime(flag.timeInSeconds)}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           {/* Real-Time Rolling Transcript */}
           <div className="flex-1 flex flex-col min-h-0">
             <div className="px-4 py-2 bg-slate-950/60 border-b border-slate-800/60 flex items-center justify-between">
               <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
                 Rolling Transcript ({transcripts.length})
               </span>
-              <span className="text-[10px] text-slate-500 font-mono">Whisper-1 ASR</span>
+              <span className="text-[10px] text-slate-500 font-mono">Nova Sonic ASR</span>
             </div>
 
             <div ref={transcriptScrollRef} className="flex-1 p-4 overflow-y-auto space-y-3">
@@ -627,15 +787,18 @@ export default function InterviewPage() {
             <div className="mt-6 flex items-center justify-end gap-3">
               <button
                 onClick={() => setShowEndModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white"
+                disabled={isFinalising}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white disabled:opacity-40"
               >
                 Resume Interview
               </button>
               <button
                 onClick={handleConfirmEnd}
-                className="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30"
+                disabled={isFinalising}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 disabled:opacity-60 flex items-center gap-2"
               >
-                Conclude & View Scorecard
+                {isFinalising && <RefreshCw className="w-3 h-3 animate-spin" />}
+                {isFinalising ? "Finalising Recording…" : "Conclude & View Scorecard"}
               </button>
             </div>
           </div>
