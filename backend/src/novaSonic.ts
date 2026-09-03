@@ -3,7 +3,6 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { bedrockClient, SONIC_MODEL_ID } from "./bedrock";
-import { generateInterviewerSystemPrompt } from "./resumeData";
 import { getSession, updateSession, appendTranscript } from "./sessionStore";
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
@@ -162,20 +161,34 @@ export function attachNovaSonicRelay(server: Server): void {
     const sessionId = new URL(req.url || "", "http://localhost").searchParams.get("sessionId");
     const prepared = sessionId ? getSession(sessionId) : undefined;
 
-    const instructions = prepared
-      ? renderInterviewerPrompt(prepared.bank, prepared.candidateName)
-      : generateInterviewerSystemPrompt();
+    // Every interview is prepared in advance by an admin. There is deliberately
+    // no fallback interviewer: running a generic hardcoded interview against a
+    // real candidate would produce an assessment nobody asked for, against a
+    // rubric nobody reviewed. Refusing is the honest outcome.
+    if (!prepared) {
+      console.warn(`[Sonic] Rejected connection — unknown session: ${sessionId || "(none)"}`);
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          error: "NO_SESSION",
+          message:
+            "No prepared interview found for this link. Please sign in again with your email.",
+        })
+      );
+      ws.close();
+      return;
+    }
 
-    if (prepared && prepared.status === "ready") {
+    const instructions = renderInterviewerPrompt(prepared.bank, prepared.candidateName);
+
+    if (prepared.status === "ready") {
       updateSession(prepared.id, { status: "in_progress", startedAt: Date.now() });
     }
 
     console.log(
-      prepared
-        ? `[Sonic] Client connected — session ${prepared.id} (${prepared.candidateName}, ` +
-            `${prepared.bank.role}, ${prepared.bank.durationMinutes}min, ` +
-            `${prepared.bank.questions.length} questions)`
-        : "[Sonic] Client connected — no prepared session, using default interviewer"
+      `[Sonic] Client connected — session ${prepared.id} (${prepared.candidateName}, ` +
+        `${prepared.bank.role}, ${prepared.bank.durationMinutes}min, ` +
+        `${prepared.bank.questions.length} questions)`
     );
 
     const session: SonicSession = {
@@ -413,9 +426,7 @@ export function attachNovaSonicRelay(server: Server): void {
               send({ type: "transcript", sender, text });
 
               // Persist server-side so the result survives the browser closing.
-              if (prepared) {
-                appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
-              }
+              appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
 
               // If the candidate asks to stop, there is no signal left to
               // gather — respect it rather than pressing on.
@@ -457,14 +468,12 @@ export function attachNovaSonicRelay(server: Server): void {
         // closes the tab must still produce a result for the hiring manager.
         // Delayed slightly so a /complete call carrying proctoring flags can
         // land first; gradeSession is idempotent either way.
-        if (prepared) {
-          const id = prepared.id;
-          setTimeout(() => {
-            gradeSession(id, "interview ended").catch((e) =>
-              console.error("[Sonic] Auto-grade failed:", e?.message)
-            );
-          }, 3000);
-        }
+        const id = prepared.id;
+        setTimeout(() => {
+          gradeSession(id, "interview ended").catch((e) =>
+            console.error("[Sonic] Auto-grade failed:", e?.message)
+          );
+        }, 3000);
       }
     })();
   });

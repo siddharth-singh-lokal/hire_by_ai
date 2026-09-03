@@ -5,10 +5,12 @@ import { useState, useRef, useEffect, useCallback } from "react";
 /**
  * Amazon Nova Sonic speech-to-speech interview client.
  *
- * Deliberately exposes the same surface as useWebRTCInterview so the interview
- * page can swap between them with a one-line import change. The transport is
- * different — a WebSocket to our Express relay rather than a direct WebRTC peer
- * connection — but the observable behaviour (transcripts, volumes, mute) matches.
+ * Browsers cannot speak HTTP/2 bidirectional streams, so this talks to the
+ * Express relay over a WebSocket and the relay faces Bedrock.
+ *
+ * Only an opaque session id travels to the browser. The questions and grading
+ * criteria stay server-side, so a candidate cannot read what they are about to
+ * be asked or how it will be scored.
  */
 
 export type ConnectionState =
@@ -421,9 +423,8 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   }, []);
 
   /**
-   * Nova Sonic's bidirectional stream is audio-in only for the candidate turn,
-   * so there is no text channel to inject into mid-session. Kept for interface
-   * parity with the WebRTC hook.
+   * The candidate turn is audio-only, so there is no text channel to type into
+   * mid-session. Kept so the interface stays stable if that changes.
    */
   const sendTextMessage = useCallback((_text: string) => {
     console.warn("[NovaSonic] Text input is not supported on the speech-to-speech stream.");
