@@ -1,39 +1,55 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { CheckCircle2 } from "lucide-react";
 
 /**
- * Where the candidate lands when the interview ends.
+ * Where every candidate lands when the interview ends.
  *
- * Deliberately says nothing about how it went. The candidate must never see a
- * score, a verdict, or a hint of one — that is the hiring manager's to read,
- * and telling someone they did badly at the moment they finish is both unkind
- * and, given this is a first-round screen, frequently wrong.
+ * They never see a score — the scorecard is admin-only. The name is read from
+ * the interview room's own handoff and then cleared, so a shared machine does
+ * not greet the next candidate by the previous one's name.
  */
 export default function ThankYouPage() {
   const [name, setName] = useState("");
 
   useEffect(() => {
-    setName(localStorage.getItem("interview_candidate_name") || "");
+    try {
+      const stored = localStorage.getItem("interview_candidate_name");
+      if (stored) setName(stored);
+      localStorage.removeItem("interview_candidate_name");
+    } catch {
+      /* private mode / storage blocked — the greeting is optional */
+    }
   }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
-      <div className="max-w-sm w-full text-center">
+      <div className="max-w-md w-full text-center">
         <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto mb-5">
-          <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+          <CheckCircle2 className="w-7 h-7 text-emerald-400" />
         </div>
 
-        <h1 className="text-lg font-bold">
-          Thanks{name && name !== "there" ? `, ${name}` : ""}
+        <h1 className="text-2xl font-bold tracking-tight">
+          Thanks{name ? `, ${name}` : ""}
         </h1>
-        <p className="mt-2 text-sm text-slate-400 leading-relaxed">
-          Your interview has been submitted to the hiring team. Someone will be in touch
-          about next steps.
+
+        <p className="text-sm text-slate-400 mt-3 leading-relaxed">
+          Your interview has been submitted. The hiring team will review the
+          conversation and follow up with you about next steps.
         </p>
 
-        <p className="mt-6 text-[11px] text-slate-600">You can close this window.</p>
+        <p className="text-xs text-slate-500 mt-6">
+          You can close this window now.
+        </p>
+
+        <Link
+          href="/"
+          className="mt-6 inline-block text-[11px] text-slate-500 hover:text-slate-300 underline"
+        >
+          Back to sign in
+        </Link>
       </div>
     </div>
   );

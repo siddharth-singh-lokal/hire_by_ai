@@ -3,8 +3,9 @@
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Mail, Loader2, AlertCircle, ArrowRight, Clock, Briefcase } from "lucide-react";
+import { Mail, Loader2, AlertCircle, ArrowRight, Clock, Briefcase, Languages } from "lucide-react";
 import { candidateSignIn, type CandidateSession } from "@/lib/api";
+import { languagePhrase } from "@/lib/languages";
 
 /**
  * Candidate sign-in.
@@ -19,6 +20,7 @@ export default function CandidateSignInPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<CandidateSession | null>(null);
+  const [entering, setEntering] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,20 +37,19 @@ export default function CandidateSignInPage() {
 
   const enter = () => {
     if (!session) return;
-    const params = new URLSearchParams({
-      sessionId: session.sessionId,
-      name: session.candidateName,
-      duration: String(session.durationMinutes),
-    });
-    router.push(`/interview?${params}`);
+    // ONLY the opaque id travels in the URL. The name and duration used to ride
+    // along, which put the candidate's name in browser history and let them edit
+    // their own timer; the interview room now looks both up server-side.
+    setEntering(true);
+    router.push(`/interview?sessionId=${encodeURIComponent(session.sessionId)}`);
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
       <div className="max-w-sm w-full">
         <div className="text-center mb-8">
-          <h1 className="text-lg font-bold">Interview sign-in</h1>
-          <p className="text-xs text-slate-500 mt-1.5">
+          <h1 className="text-2xl font-bold tracking-tight">Interview sign-in</h1>
+          <p className="text-sm text-slate-400 mt-2">
             Enter the email address you applied with.
           </p>
         </div>
@@ -65,7 +66,10 @@ export default function CandidateSignInPage() {
                 required
                 autoFocus
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="you@example.com"
                 className="w-full rounded-xl bg-slate-900/60 border border-slate-800 focus:border-indigo-600 focus:outline-none px-3 py-2.5 text-sm placeholder:text-slate-600"
               />
@@ -100,6 +104,12 @@ export default function CandidateSignInPage() {
                 <Clock className="w-3.5 h-3.5 text-slate-600" />
                 {session.durationMinutes} minutes
               </div>
+              {languagePhrase(session.language) && (
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <Languages className="w-3.5 h-3.5 text-slate-600" />
+                  Conducted {languagePhrase(session.language)}
+                </div>
+              )}
             </div>
 
             <p className="mt-4 text-[11px] text-slate-500 leading-relaxed">
@@ -109,15 +119,27 @@ export default function CandidateSignInPage() {
 
             <button
               onClick={enter}
-              className="mt-5 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 transition-colors"
+              disabled={entering}
+              className="mt-5 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors"
             >
-              Continue to interview
-              <ArrowRight className="w-4 h-4" />
+              {entering ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {entering ? "Opening…" : "Continue to interview"}
+              {!entering && <ArrowRight className="w-4 h-4" />}
+            </button>
+
+            <button
+              onClick={() => {
+                setSession(null);
+                setEmail("");
+              }}
+              className="mt-3 text-[11px] text-slate-500 hover:text-slate-300"
+            >
+              Not you? Use a different email
             </button>
           </div>
         )}
 
-        <p className="mt-8 text-center text-[10px] text-slate-700">
+        <p className="mt-8 text-center text-[11px] text-slate-500">
           Hiring team?{" "}
           <Link href="/admin" className="text-slate-500 hover:text-slate-300 underline">
             Admin console

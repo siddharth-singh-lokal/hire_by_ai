@@ -9,7 +9,9 @@
     "dev": "ts-node src/server.ts",
     "verify:redaction": "ts-node src/contextPack/verifyRedaction.ts",
     "pack:build": "ts-node src/contextPack/build.ts",
-    "pack:fetch": "ts-node src/contextPack/fetch.ts"
+    "pack:fetch": "ts-node src/contextPack/fetch.ts",
+    "e2e": "ts-node -P scripts/tsconfig.json scripts/e2e.ts",
+    "typecheck": "tsc --noEmit && tsc -p scripts/tsconfig.json"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1125.0",

@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { bedrockClient, GENERATION_MODEL_ID, extractJson } from "./bedrock";
 import { ContextPack } from "./contextPack/types";
+import { LanguageConfig, LANGUAGES, DEFAULT_LANGUAGE } from "./languages";
 
 /**
  * Question bank generation.
@@ -21,6 +22,33 @@ import { ContextPack } from "./contextPack/types";
  */
 
 const PACK_PATH = path.join(__dirname, "contextPack", "context-pack.json");
+const ROLE_CONTEXT_DIR = path.join(__dirname, "contextPack", "role-context");
+
+/**
+ * Hand-written, public-safe context for the disciplines the Context Pack cannot
+ * cover.
+ *
+ * The pack is built from engineering documents, so it only ever produces
+ * backend/infra scenarios — a Product Analyst was getting connection-pooling
+ * questions, which is worse than useless. PRDs and roadmaps cannot fill the gap
+ * either: the sanitizer rejects business logic by design and correctly returns
+ * no scenarios for them.
+ *
+ * So these files are authored by hand at the same trust level as
+ * company-profile.md — a human wrote them, a human reviews them, and they
+ * bypass sanitization because there is nothing in them to sanitize. They
+ * describe the SHAPE of the work (users on low-end phones, ten languages, lossy
+ * mobile events) and never a metric, a price or an experiment result.
+ */
+function loadRoleContext(discipline: string): string | null {
+  const file = path.join(ROLE_CONTEXT_DIR, `${discipline}.md`);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 export type InterviewDuration = 1 | 5 | 15 | 30 | 45;
 
@@ -142,6 +170,7 @@ function buildSystemPrompt(
   duration: InterviewDuration,
   discipline: string
 ): string {
+  const roleContext = loadRoleContext(discipline);
   // Only scenarios tagged for this discipline (or genuinely role-agnostic ones).
   const relevant = pack
     ? pack.scenarios.filter((sc) => {
@@ -188,11 +217,31 @@ USING THE SCENARIOS
 COMPANY PROFILE (public-safe; use for tone only, never quiz on it):
 ${pack.companyProfile}
 
-NO ROLE-RELEVANT SCENARIOS AVAILABLE. The organisation's documented scenarios are for other disciplines and would be meaningless for a ${discipline} role — do NOT use them. Build scenario questions from the responsibilities and tools named in the JD itself. Keep them concrete and situational rather than trivia.
+NO ROLE-RELEVANT ENGINEERING SCENARIOS AVAILABLE. The organisation's documented incident scenarios are for other disciplines and would be meaningless for a ${discipline} role — do NOT use them.${
+        roleContext
+          ? ` Use the ROLE CONTEXT below instead: it describes what this role actually deals with here, and your scenario questions should be shaped like those problems.`
+          : ` Build scenario questions from the responsibilities and tools named in the JD itself. Keep them concrete and situational rather than trivia.`
+      }
 `
     : `
 NO ORG CONTEXT AVAILABLE. Generate scenario questions from the technologies named in the JD instead. Keep them concrete and situational rather than trivia.
 `;
+
+  // Role context applies whether or not engineering scenarios matched, so a
+  // backend candidate gets both the real incidents and the operating reality.
+  const roleSection = roleContext
+    ? `
+ROLE CONTEXT — what a ${discipline} person actually deals with at this company. Public-safe and human-approved; it describes the SHAPE of the work, not confidential detail.
+
+${roleContext}
+
+USING THE ROLE CONTEXT
+- Build "scenario" questions that look like the problems listed under "the kind of problem worth reasoning about". Make them concrete and situational.
+- Ground them in this company's reality — users on low-end devices, many Indian languages, cost-conscious infrastructure, multi-product pods — so the question could not have come from a generic interview bank.
+- NEVER quiz the candidate on this company's products, structure or history. They have not worked here. Pose a problem to reason about; unfamiliarity with the context is never a mark against them.
+- Invent no numbers. Do not state metrics, revenue, prices or experiment results, and do not ask the candidate to guess any.
+`
+    : "";
 
   return `You are a thoughtful engineer designing a Round-0 SCREENING conversation.
 
@@ -213,7 +262,7 @@ CALIBRATE ACCORDINGLY
 
 STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
 Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
-${packSection}
+${packSection}${roleSection}
 
 DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.scenarios} scenario question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
 
@@ -414,6 +463,8 @@ export interface RenderOptions {
    * greeting the candidate a second time.
    */
   resumeNote?: string;
+  /** Interview language; decides the interviewer's name and a spoken directive. */
+  language?: LanguageConfig;
 }
 
 /**
@@ -447,13 +498,16 @@ ${i + 1}. [~${q.minutes} min] ${q.question}${
     )
     .join("\n");
 
+  const language = options.language ?? LANGUAGES[DEFAULT_LANGUAGE];
+  const interviewer = language.interviewerName;
+
   const openingSection = options.resumeNote
     ? `THIS IS A RESUMED CALL — READ THIS FIRST
 ${options.resumeNote}`
     : `HOW TO OPEN
 ${personaliseOpening(bank.openingLine, candidateName)}`;
 
-  return `You are Sarah Chen, a senior engineer conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
+  return `You are ${interviewer}, a senior engineer conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
 
 The candidate's name is ${candidateName}. ${
     options.resumeNote
@@ -470,7 +524,11 @@ HOW TO CONDUCT THIS
 
 KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or three sentences, then stop talking. You are on a voice call — a thirty-second monologue is unbearable to sit through and burns interview time the candidate needs for answering. Ask the question and stop. Do not preamble, do not restate the question a second way, do not explain why you are asking.
 
-LANGUAGE. Candidates may answer in English, Hindi, or a mix of the two — many people here think in Hindi and switch mid-sentence. That is completely fine and says nothing about their ability. Understand them either way, never comment on their English or ask them to switch, and reply in clear, simple English unless they clearly prefer Hindi, in which case mirror them.
+LANGUAGE. ${
+    language.directive
+      ? language.directive
+      : "Candidates may answer in English, Hindi, or a mix of the two — many people here think in Hindi and switch mid-sentence. That is completely fine and says nothing about their ability. Understand them either way, never comment on their English or ask them to switch, and reply in clear, simple English unless they clearly prefer Hindi, in which case mirror them."
+  }
 
 - You have ${bank.durationMinutes} minutes total. Watch your pacing. Spending several minutes on the intro and rushing the technical questions is the most common way this interview fails.
 - Ask ONE question at a time, then stop and listen. Never stack multiple questions into one turn.

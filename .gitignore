@@ -37,3 +37,4 @@ backend/src/contextPack/raw/
 # Prepared interviews: candidate names, emails and transcripts
 backend/.sessions.json
 backend/.evidence/
+backend/e2e-*.wav

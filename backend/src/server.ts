@@ -4,7 +4,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
 import { attachNovaSonicRelay } from "./novaSonic";
-import { generateQuestionBank, loadContextPack, InterviewDuration } from "./questionBank";
+import { generateQuestionBank, loadContextPack, InterviewDuration, QuestionBank } from "./questionBank";
+import { resolveLanguage } from "./languages";
 import {
   createSession,
   getSession,
@@ -84,7 +85,7 @@ app.post("/api/extract-text", async (req: Request, res: Response) => {
 // This is the step that makes the interview role-aware and org-grounded.
 app.post("/api/prepare", async (req: Request, res: Response) => {
   try {
-    const { jdText, resumeText, candidateName, candidateEmail, durationMinutes } =
+    const { jdText, resumeText, candidateName, candidateEmail, durationMinutes, language } =
       req.body || {};
 
     if (!jdText?.trim() || !resumeText?.trim()) {
@@ -102,16 +103,28 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       });
     }
 
+    // Name is spoken aloud by the interviewer and greets the candidate in the
+    // UI, so it is required rather than defaulted to a literal "the candidate".
+    if (!candidateName?.trim()) {
+      return res.status(400).json({
+        error: "MISSING_NAME",
+        message: "A candidate name is required — the interviewer greets them by it.",
+      });
+    }
+
     const duration = ([1, 5, 15, 30, 45] as const).includes(durationMinutes)
       ? (durationMinutes as InterviewDuration)
       : 30;
+    // Unsupported language codes fall back to English inside resolveLanguage.
+    const langCode = resolveLanguage(language).code;
 
     const started = Date.now();
     const bank = await generateQuestionBank({ jdText, resumeText, duration });
     const session = createSession({
-      candidateName: candidateName?.trim() || "the candidate",
+      candidateName: candidateName.trim(),
       candidateEmail,
       bank,
+      language: langCode,
     });
 
     console.log(
@@ -127,6 +140,7 @@ app.post("/api/prepare", async (req: Request, res: Response) => {
       sessionId: session.id,
       candidateName: session.candidateName,
       candidateEmail: session.candidateEmail,
+      language: session.language,
       bank,
       grounded: loadContextPack() !== null,
     });
@@ -166,8 +180,78 @@ app.post("/api/candidate/signin", (req: Request, res: Response) => {
     role: session.bank.role,
     durationMinutes: session.bank.durationMinutes,
     questionCount: session.bank.questions.length,
+    language: session.language,
   });
 });
+
+// 1b-ii-b. Candidate session detail, looked up by opaque id — what the interview
+// room needs to render (name, duration, language, status) without the bank ever
+// reaching the browser. Deliberately 200 for every status so the lobby can show
+// the right state (ready / rejoin / already done). serverNow lets the client
+// cancel clock skew when deriving the timer from startedAt.
+app.get("/api/candidate/session/:id", (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({
+      error: "NOT_FOUND",
+      message: "No interview found for this link. Please sign in again with your email.",
+    });
+  }
+  return res.json({
+    sessionId: session.id,
+    candidateName: session.candidateName,
+    role: session.bank.role,
+    durationMinutes: session.bank.durationMinutes,
+    language: session.language || "en",
+    status: session.status,
+    startedAt: session.startedAt ?? null,
+    serverNow: Date.now(),
+  });
+});
+
+// DEV ONLY: create a session directly from a bank fixture, skipping the ~50s
+// generation, so the e2e harness can drive the relay repeatably. Guarded on
+// NODE_ENV; neither `npm run dev` nor `npm start` sets it, so this is only
+// closed off in a real deployment that does. Never exposes anything the normal
+// prepare flow does not.
+if (process.env.NODE_ENV !== "production") {
+  app.post("/api/dev/prepare-from-bank", (req: Request, res: Response) => {
+    const { bank: posted, fromSessionId, candidateName, candidateEmail, language } =
+      req.body || {};
+    const bank: QuestionBank | undefined =
+      posted ?? (fromSessionId ? getSession(String(fromSessionId))?.bank : undefined);
+    const ok =
+      !!bank &&
+      typeof bank.role === "string" &&
+      [1, 5, 15, 30, 45].includes(bank.durationMinutes) &&
+      Array.isArray(bank.rubric) &&
+      bank.rubric.length > 0 &&
+      Array.isArray(bank.questions) &&
+      bank.questions.length > 0;
+    if (!ok) {
+      return res.status(400).json({
+        error: "BAD_BANK",
+        message: "Provide a valid `bank` object or a `fromSessionId` that has one.",
+      });
+    }
+    const session = createSession({
+      candidateName: String(candidateName || "E2E Candidate"),
+      candidateEmail: String(candidateEmail || `e2e+${Date.now().toString(36)}@example.test`),
+      bank: bank as QuestionBank,
+      language: resolveLanguage(language).code,
+    });
+    return res.json({
+      success: true,
+      sessionId: session.id,
+      role: session.bank.role,
+      durationMinutes: session.bank.durationMinutes,
+      rubricAxes: session.bank.rubric.length,
+      questionCount: session.bank.questions.length,
+      language: session.language,
+    });
+  });
+  console.log("[Dev] POST /api/dev/prepare-from-bank enabled (NODE_ENV != production)");
+}
 
 // 1b-iii. Admin list of every prepared interview and its outcome.
 app.get("/api/admin/sessions", (_req: Request, res: Response) => {
@@ -190,6 +274,7 @@ app.get("/api/admin/sessions", (_req: Request, res: Response) => {
       streamDrops: s.streamDrops || 0,
       screenQuality: s.scorecard?.screenQuality,
       rescreenRecommended: s.scorecard?.rescreenRecommended,
+      language: s.language || "en",
     })),
   });
 });

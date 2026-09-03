@@ -1,6 +1,11 @@
 import { evaluateInterview, evaluateGeneric } from "./evaluate";
 import { loadContextPack } from "./questionBank";
 import { getSession, updateSession } from "./sessionStore";
+import { LANGUAGES } from "./languages";
+
+function languageLabel(code?: string): string {
+  return (code && LANGUAGES[code as keyof typeof LANGUAGES]?.label) || "English";
+}
 
 /**
  * Grades a finished interview, server-side and unprompted.
@@ -57,6 +62,7 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
       redFlags: session.redFlags,
       orgGrounded: loadContextPack() !== null,
       streamDrops: session.streamDrops || 0,
+      interviewLanguage: languageLabel(session.language),
     });
 
     // The counterfactual runs alongside but must never block the real result.

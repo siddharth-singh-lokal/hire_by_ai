@@ -53,6 +53,8 @@ export interface InterviewSession {
   candidateName: string;
   candidateEmail: string;
   role: string;
+  /** Interview language code (see languages.ts). Defaults to English. */
+  language: string;
   bank: QuestionBank;
   status: InterviewStatus;
   createdAt: number;
@@ -248,6 +250,7 @@ export function createSession(input: {
   candidateName: string;
   candidateEmail: string;
   bank: QuestionBank;
+  language?: string;
 }): InterviewSession {
   evictExpired();
 
@@ -259,6 +262,7 @@ export function createSession(input: {
     candidateName: input.candidateName,
     candidateEmail: email,
     role: input.bank.role,
+    language: input.language || "en",
     bank: input.bank,
     status: "ready",
     createdAt: Date.now(),

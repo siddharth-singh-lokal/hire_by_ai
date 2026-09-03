@@ -2,10 +2,11 @@ import { randomUUID } from "crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
-import { bedrockClient, SONIC_MODEL_ID } from "./bedrock";
+import { sonicClient, SONIC_MODEL_ID } from "./bedrock";
 import { getSession, updateSession, appendTranscript, recordStreamDrop } from "./sessionStore";
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
+import { resolveLanguage } from "./languages";
 
 /**
  * Nova Sonic relay.
@@ -24,9 +25,6 @@ import { renderInterviewerPrompt } from "./questionBank";
 
 const AUDIO_INPUT_SAMPLE_RATE = 16000;
 const AUDIO_OUTPUT_SAMPLE_RATE = 24000;
-
-/** Sarah Chen reads as female; Nova Sonic ships tiffany/matthew/amy. */
-const VOICE_ID = process.env.BEDROCK_SONIC_VOICE || "tiffany";
 
 /**
  * An async iterable the Bedrock SDK can consume, that we can push into from
@@ -84,6 +82,13 @@ interface SonicSession {
   closed: boolean;
   /** Set once a termination goodbye has been injected, so it only happens once. */
   terminating: boolean;
+  /**
+   * Aborts the Bedrock request after teardown. Closing our input queue alone
+   * does NOT end Bedrock's response stream promptly — observed to stay open for
+   * minutes — which left the relay's read loop hanging and the session's GPU
+   * resources allocated. sessionEnd is sent first; this is the backstop.
+   */
+  abort: AbortController;
 }
 
 /**
@@ -179,17 +184,24 @@ function newSonicSession(): SonicSession {
     ready: false,
     closed: false,
     terminating: false,
+    abort: new AbortController(),
   };
 }
 
 /**
  * Bedrock drops these bidirectional streams. Observed repeatedly in testing:
- * NGHTTP2_INTERNAL_ERROR and ModelStreamErrorException, sometimes seconds into
- * a session. Previously that ended the interview outright — the candidate was
+ * NGHTTP2_INTERNAL_ERROR, ModelStreamErrorException and "Truncated event
+ * message received" (the HTTP/2 stream closing mid-frame, so the eventstream
+ * decoder sees a short message) — sometimes seconds into a session. Every one
+ * of these is transport-level and transient: the ONLY wrong response is to end
+ * the interview, so this pattern is deliberately broad. A phrase missing from
+ * it costs a candidate their interview, while a false positive costs one
+ * harmless retry. Previously that ended the interview outright — the candidate was
  * left with a silent interviewer and the transcript held four turns of
  * introduction, which the grader then correctly reported as empty.
  */
-const RECOVERABLE = /ModelStreamError|ServiceUnavailable|Throttl|InternalServer|NGHTTP2|ECONNRESET|EPIPE|stream closed/i;
+const RECOVERABLE =
+  /ModelStreamError|ServiceUnavailable|Throttl|InternalServer|NGHTTP2|ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|stream closed|Truncated event message|Unexpected end|socket hang up|GOAWAY|ERR_HTTP2|TimeoutError|aborted/i;
 /**
  * Consecutive failed attempts before giving up. The counter resets once a
  * re-established stream has carried a real candidate turn: a call that drops
@@ -233,6 +245,11 @@ export function attachNovaSonicRelay(server: Server): void {
       updateSession(prepared.id, { status: "in_progress", startedAt: Date.now() });
     }
 
+    // Interview language decides the voice and a prompt directive. Unsupported
+    // codes fall back to English inside resolveLanguage, so a bad value never
+    // hands Sonic a locale it cannot speak.
+    const lang = resolveLanguage((prepared as any).language);
+
     console.log(
       `[Sonic] Client connected — session ${prepared.id} (${prepared.candidateName}, ` +
         `${prepared.bank.role}, ${prepared.bank.durationMinutes}min, ` +
@@ -244,6 +261,13 @@ export function attachNovaSonicRelay(server: Server): void {
     let session: SonicSession = newSonicSession();
     let attempt = 0;
     let finished = false;
+    /**
+     * Mic chunks that arrived while the Bedrock stream was being re-established.
+     * 32ms per chunk, so this is ~2s of audio — enough to cover a reconnect
+     * without replaying so much that Sonic hears a stale sentence.
+     */
+    const pendingAudio: string[] = [];
+    const MAX_PENDING_AUDIO_CHUNKS = 64;
 
     const send = (payload: any) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -254,6 +278,10 @@ export function attachNovaSonicRelay(server: Server): void {
       session.closed = true;
       console.log(`[Sonic] Session closing: ${reason}`);
       session.queue.close();
+      // Give the queued contentEnd/promptEnd/sessionEnd two seconds to reach
+      // Bedrock, then abort so the read loop exits and resources are freed.
+      const s = session;
+      setTimeout(() => s.abort.abort(), 2000);
     };
 
     // --- Outbound: browser -> Bedrock -------------------------------------
@@ -269,7 +297,15 @@ export function attachNovaSonicRelay(server: Server): void {
       switch (msg.type) {
         case "audio": {
           // Continuous stream of base64 PCM16 @16kHz from the mic worklet.
-          if (!session.ready || session.closed) return;
+          if (session.closed) return;
+          if (!session.ready) {
+            // Mid-reconnect: Sonic is not listening yet. Hold the most recent
+            // couple of seconds rather than dropping it, so a candidate who
+            // keeps talking through a drop is not cut off mid-word.
+            pendingAudio.push(msg.data);
+            if (pendingAudio.length > MAX_PENDING_AUDIO_CHUNKS) pendingAudio.shift();
+            return;
+          }
           session.queue.push({
             event: {
               audioInput: {
@@ -305,6 +341,10 @@ export function attachNovaSonicRelay(server: Server): void {
           if (!typed) return;
           send({ type: "transcript", sender: "candidate", text: typed });
           appendTranscript(prepared.id, { sender: "candidate", text: typed, timestamp: Date.now() });
+          // A real candidate turn proves the stream works — reset the
+          // consecutive-failure budget (ASR turns do this too, but a text-only
+          // run never emits ASR, so a long call would otherwise die on drop #6).
+          if (attempt > 0) attempt = 0;
           injectSystemNote(session, typed);
           if (detectsEndIntent(typed)) send({ type: "end_requested" });
           break;
@@ -337,9 +377,10 @@ export function attachNovaSonicRelay(server: Server): void {
           setTimeout(
             () => {
               if (session.closed) return;
-              finished = true; // a deliberate ending, not a dropped stream
               closeSonicStream(session);
-              teardown(`terminated: ${msg.reason || "requested"}`);
+              // The goodbye audio has already been delivered; the browser closes
+              // its own socket once it finishes playing. Grading starts here.
+              finish(`terminated: ${msg.reason || "requested"}`, { closeWs: false });
             },
             msg.wrapUp ? 15000 : 8000
           );
@@ -349,21 +390,21 @@ export function attachNovaSonicRelay(server: Server): void {
 
         case "stop": {
           if (session.closed) return;
-          finished = true; // a normal end, not a drop — do not reconnect
           closeSonicStream(session);
-          teardown("client requested stop");
+          finish("client requested stop", { closeWs: false });
           break;
         }
       }
     });
 
-    ws.on("close", () => {
-      finished = true;
-      teardown("websocket closed");
-    });
+    // A closed tab, a crashed browser, a lost network: the transcript is already
+    // server-side, so the interview is graded regardless. This used to only
+    // tear the stream down, and grading silently depended on the browser
+    // posting /complete afterwards.
+    ws.on("close", () => finish("websocket closed", { closeWs: false }));
     ws.on("error", (err) => {
       console.error("[Sonic] WebSocket error:", err);
-      teardown("websocket error");
+      finish("websocket error", { closeWs: false });
     });
 
     // --- Session bootstrap -------------------------------------------------
@@ -398,7 +439,7 @@ export function attachNovaSonicRelay(server: Server): void {
             sampleRateHertz: AUDIO_OUTPUT_SAMPLE_RATE,
             sampleSizeBits: 16,
             channelCount: 1,
-            voiceId: VOICE_ID,
+            voiceId: lang.voiceId,
             encoding: "base64",
             audioType: "SPEECH",
           },
@@ -428,7 +469,10 @@ export function attachNovaSonicRelay(server: Server): void {
           // On a resume the opening instructions are replaced by the resume
           // note. Appending it after them left "HOW TO OPEN" in force, and the
           // interviewer greeted the candidate afresh after every drop.
-          content: renderInterviewerPrompt(prepared.bank, prepared.candidateName, { resumeNote }),
+          content: renderInterviewerPrompt(prepared.bank, prepared.candidateName, {
+            resumeNote,
+            language: lang,
+          }),
         },
       },
     });
@@ -513,14 +557,32 @@ export function attachNovaSonicRelay(server: Server): void {
       bootstrap(resumeNote);
 
       try {
-        const response = await bedrockClient.send(
+        const response = await sonicClient.send(
           new InvokeModelWithBidirectionalStreamCommand({
             modelId: SONIC_MODEL_ID,
             body: session.queue as any,
-          })
+          }),
+          { abortSignal: session.abort.signal }
         );
 
         send({ type: "ready" });
+
+        // Replay whatever the candidate said while we were reconnecting.
+        if (pendingAudio.length) {
+          const held = pendingAudio.splice(0, pendingAudio.length);
+          for (const content of held) {
+            session.queue.push({
+              event: {
+                audioInput: {
+                  promptName: session.promptName,
+                  contentName: session.audioContentName,
+                  content,
+                },
+              },
+            });
+          }
+          console.log(`[Sonic] ${prepared.id} — replayed ${held.length} buffered mic chunk(s)`);
+        }
 
         for await (const chunk of response.body as any) {
           const bytes = chunk?.chunk?.bytes;
@@ -600,7 +662,19 @@ export function attachNovaSonicRelay(server: Server): void {
         }
         throw new Error("stream closed unexpectedly");
       } catch (err: any) {
-        const label = `${err?.name || "Error"}: ${err?.message || "unknown"}`;
+        // A deliberate ending: finish() already ran (stop / terminate / tab
+        // closed) and our own abort unwound the read loop. Nothing to report.
+        if (finished || finishCalled || err?.name === "AbortError") {
+          if (!finishCalled) finish("stream ended");
+          return;
+        }
+        // ModelStreamErrorException (server-side, HTTP 424) carries these two;
+        // NGHTTP2_INTERNAL_ERROR (client-side HTTP/2) does not. Logging them
+        // apart is how we tell an Amazon-side fault from our own connection.
+        const origin = err?.originalStatusCode
+          ? ` [origin ${err.originalStatusCode}: ${err?.originalMessage || ""}]`
+          : "";
+        const label = `${err?.name || "Error"}: ${err?.message || "unknown"}${origin}`;
         const recoverable = RECOVERABLE.test(label);
 
         if (recoverable && !finished && ws.readyState === WebSocket.OPEN && ++attempt <= MAX_STREAM_ATTEMPTS) {
@@ -645,11 +719,13 @@ export function attachNovaSonicRelay(server: Server): void {
      * Ends the interview once, no matter which path got here, and kicks off
      * grading. The browser may already be gone.
      */
-    const finish = (reason: string) => {
-      if (finished) return;
-      finished = true;
+    let finishCalled = false;
+    const finish = (reason: string, opts: { closeWs?: boolean } = {}) => {
+      if (finishCalled) return;
+      finishCalled = true;
+      finished = true; // a deliberate ending, not a dropped stream — never reconnect
       teardown(reason);
-      if (ws.readyState === WebSocket.OPEN) ws.close();
+      if (opts.closeWs !== false && ws.readyState === WebSocket.OPEN) ws.close();
 
       const id = prepared.id;
       setTimeout(() => {

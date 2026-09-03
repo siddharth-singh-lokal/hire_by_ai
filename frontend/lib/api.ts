@@ -59,11 +59,38 @@ export interface CandidateSession {
   role: string;
   durationMinutes: number;
   questionCount: number;
+  language: string;
 }
 
 /** Candidate lookup by email. Returns nothing that reveals the questions. */
 export function candidateSignIn(email: string): Promise<CandidateSession> {
   return post<CandidateSession>("/api/candidate/signin", { email });
+}
+
+export type CandidateSessionStatus = "ready" | "in_progress" | "grading" | "completed" | "terminated";
+
+/**
+ * What the interview room needs, looked up by the opaque session id alone. The
+ * name and duration used to travel in the URL, where a candidate could edit
+ * them (and a missing param silently meant a 30-minute timer).
+ */
+export interface CandidateSessionDetail {
+  sessionId: string;
+  candidateName: string;
+  role: string;
+  durationMinutes: number;
+  language: string;
+  status: CandidateSessionStatus;
+  startedAt: number | null;
+  /** Server clock at response time, so the client can cancel skew. */
+  serverNow: number;
+}
+
+export async function fetchCandidateSession(sessionId: string): Promise<CandidateSessionDetail> {
+  const res = await fetch(`${BACKEND_URL}/api/candidate/session/${encodeURIComponent(sessionId)}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as any)?.message || "Could not load this interview.");
+  return data as CandidateSessionDetail;
 }
 
 export interface AdminSessionRow {
@@ -84,6 +111,7 @@ export interface AdminSessionRow {
   streamDrops?: number;
   screenQuality?: "clean" | "degraded" | "compromised";
   rescreenRecommended?: boolean;
+  language?: string;
 }
 
 export async function listAdminSessions(): Promise<AdminSessionRow[]> {
@@ -103,6 +131,7 @@ export interface PrepareResult {
   sessionId: string;
   candidateName: string;
   candidateEmail: string;
+  language: string;
   bank: QuestionBank;
   grounded: boolean;
 }
@@ -113,6 +142,7 @@ export function prepareInterview(input: {
   candidateName: string;
   candidateEmail: string;
   durationMinutes: 1 | 5 | 15 | 30 | 45;
+  language: string;
 }): Promise<PrepareResult> {
   return post<PrepareResult>("/api/prepare", input);
 }

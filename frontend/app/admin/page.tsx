@@ -18,7 +18,9 @@ import {
   Users,
   Copy,
   Check,
+  Languages,
 } from "lucide-react";
+import { LANGUAGES, languageLabel } from "@/lib/languages";
 import {
   prepareInterview,
   extractPdfText,
@@ -129,6 +131,7 @@ export default function AdminPage() {
   const [candidateName, setCandidateName] = useState("");
   const [candidateEmail, setCandidateEmail] = useState("");
   const [duration, setDuration] = useState<Duration>(15);
+  const [language, setLanguage] = useState<string>("en");
   const [jdText, setJdText] = useState("");
   const [resumeText, setResumeText] = useState("");
 
@@ -162,7 +165,11 @@ export default function AdminPage() {
 
   const validEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(candidateEmail.trim());
   const canPrepare =
-    jdText.trim().length > 50 && resumeText.trim().length > 50 && validEmail && !preparing;
+    jdText.trim().length > 50 &&
+    resumeText.trim().length > 50 &&
+    validEmail &&
+    candidateName.trim().length > 0 &&
+    !preparing;
 
   const handlePrepare = async () => {
     setPreparing(true);
@@ -172,9 +179,10 @@ export default function AdminPage() {
       const result = await prepareInterview({
         jdText,
         resumeText,
-        candidateName: candidateName.trim() || "the candidate",
+        candidateName: candidateName.trim(),
         candidateEmail: candidateEmail.trim(),
         durationMinutes: duration,
+        language,
       });
       setBank(result.bank);
       setPreparedEmail(result.candidateEmail);
@@ -196,7 +204,7 @@ export default function AdminPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <div>
             <h1 className="text-sm font-bold">Round-0 · Admin</h1>
             <p className="text-[10px] text-slate-500">Prepare and review screening interviews</p>
@@ -220,7 +228,7 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div className="max-w-7xl mx-auto px-6 flex gap-1">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1">
           {(
             [
               ["new", "New interview", <Plus key="p" className="w-3.5 h-3.5" />],
@@ -243,7 +251,7 @@ export default function AdminPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
         {tab === "new" ? (
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_440px] gap-8 items-start">
             <section className="space-y-5">
@@ -293,7 +301,7 @@ export default function AdminPage() {
                   <Clock className="w-3.5 h-3.5 text-slate-500" />
                   Interview length
                 </label>
-                <div className="grid grid-cols-5 gap-2">
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                   {([1, 5, 15, 30, 45] as Duration[]).map((d) => (
                     <button
                       key={d}
@@ -311,7 +319,49 @@ export default function AdminPage() {
                 <p className="mt-1.5 text-[10px] text-slate-500">{DURATION_COPY[duration]}</p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-[280px]">
+              {/* Interview language. Nova Sonic speaks Hindi and English natively;
+                  the rest of Lokal's languages are shown but disabled until the
+                  Sarvam AI path lands, rather than shipping a call that sounds
+                  broken in Telugu. */}
+              <div>
+                <label className="flex items-center gap-2 text-xs font-semibold text-slate-300 mb-2">
+                  <Languages className="w-3.5 h-3.5 text-slate-500" />
+                  Interview language
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {LANGUAGES.map((l) => (
+                    <button
+                      key={l.code}
+                      onClick={() => l.available && setLanguage(l.code)}
+                      disabled={!l.available}
+                      title={
+                        l.available
+                          ? `Conduct the interview in ${l.label}`
+                          : `${l.label} is not supported by the voice model yet — planned via Sarvam AI`
+                      }
+                      className={`py-2 px-2 rounded-xl border text-left transition-colors ${
+                        !l.available
+                          ? "bg-slate-950/40 border-slate-800/60 text-slate-600 cursor-not-allowed"
+                          : language === l.code
+                          ? "bg-indigo-500/15 border-indigo-500/50 text-indigo-200"
+                          : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold truncate">{l.label}</span>
+                      <span className="block text-[10px] opacity-70 truncate">
+                        {l.available ? l.nativeLabel : "coming soon"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[10px] text-slate-500">
+                  Live now on Amazon Nova Sonic, which speaks Hindi and English with real
+                  turn-taking and interruption. The remaining languages need a different
+                  speech engine (Sarvam AI) and are next, not faked.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:h-[280px]">
                 <DocumentInput
                   label="Job description"
                   hint="Paste the JD, or upload the PDF."
@@ -369,8 +419,8 @@ export default function AdminPage() {
                     <div className="min-w-0">
                       <h3 className="text-sm font-bold truncate">{bank.role}</h3>
                       <p className="text-[11px] text-slate-500 mt-0.5">
-                        {bank.seniority} · {bank.durationMinutes} min · {bank.questions.length}{" "}
-                        questions
+                        {bank.seniority} · {bank.durationMinutes} min ·{" "}
+                        {bank.questions.length} questions · {languageLabel(language)}
                       </p>
                     </div>
                     {grounded && (
@@ -508,6 +558,7 @@ export default function AdminPage() {
                       <p className="text-[11px] text-slate-300 truncate">{s.role}</p>
                       <p className="text-[10px] text-slate-500">
                         {s.seniority} · {s.durationMinutes} min
+                        {s.language && s.language !== "en" ? ` · ${languageLabel(s.language)}` : ""}
                       </p>
                     </div>
 

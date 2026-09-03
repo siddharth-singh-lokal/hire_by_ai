@@ -56,12 +56,18 @@ PHASE 2 — live call, ZERO retrieval
 
 | Task | Model | Why |
 |---|---|---|
-| Voice interview | `amazon.nova-2-sonic-v1:0` | Only speech-to-speech on Bedrock. Barge-in, plus text transcripts on the same stream |
+| Voice interview | `amazon.nova-2-sonic-v1:0` | Only speech-to-speech on Bedrock. Barge-in, native Hindi and English, plus text transcripts on the same stream |
 | Question bank | `us.anthropic.claude-sonnet-4-6` | Benchmarked level with Opus 4.6 on the same transcript at a fraction of the cost; runs once before the call |
 | Evaluation | `us.anthropic.claude-sonnet-4-6` | Same structured output as Opus 4.6 on the transcript; Opus stays a one-line override when a decision warrants it |
 | Sanitize + validate | `us.anthropic.claude-sonnet-4-6` | Bulk offline workload; low-temperature extraction, not generation |
 
-Measured: **~1.8s** end-of-speech to first audio byte.
+Measured: **~1.8s** end-of-speech to first audio byte; **~2.9s** from stream open to the interviewer's first word.
+
+### Languages
+
+The interview is conducted in **English, Hinglish, Hindi or Indian English** — Nova Sonic speaks all four natively, code-switches Hinglish mid-sentence, and uses the `kiara`/`arjun` Indian voices for the Hindi and Indian-English options. Only the spoken conversation is translated; the question bank, rubric, gap matrix and Round-1 briefing stay in English so candidates remain comparable across languages, and the grader is instructed to quote evidence verbatim in the original script with an English gloss.
+
+Lokal's other languages — Telugu, Tamil, Kannada, Malayalam, Marathi, Gujarati, Bengali — appear in the picker but are **disabled**, because Nova Sonic does not support them and faking it would produce a call that sounds broken. The next step for those is Sarvam AI, which has native realtime speech-to-speech across 22 Indian languages.
 
 ---
 
@@ -81,8 +87,17 @@ SLACK_BOT_TOKEN=xoxb-...       # channels:history + channels:read
 ```
 
 ```bash
+npm run dev            # both at once
 npm run dev:backend    # :4000  — API + Nova Sonic relay
 npm run dev:frontend   # :3030  — setup, interview room, scorecard
+```
+
+Verify the voice path without a microphone:
+
+```bash
+npm run e2e                  # a whole interview over the WebSocket, then asserts the scorecard
+npm run e2e -- --loop 3      # measure how often the Bedrock stream drops
+npm run e2e -- --lang hi     # Hindi run; writes backend/e2e-hi.wav so you can listen
 ```
 
 Open **http://localhost:3030**, paste or upload a JD and a resume, set the candidate's name and interview length, generate the plan, review it, start.
@@ -131,6 +146,15 @@ That last pair matters most. *"We run PostgreSQL and Redis behind Django"* is a 
 Proctoring flags feed the **authenticity** rating only. They are explicitly excluded from technical scoring — an unexplained tab switch says nothing about whether someone understands connection pooling.
 
 ---
+
+## Reliability
+
+Bedrock's bidirectional stream used to drop every few minutes, mid-answer. Two causes, both now addressed:
+
+- **A shared HTTP/2 connection.** The SDK does not flag `InvokeModelWithBidirectionalStream` as an event stream, so the voice stream leased a *pooled* connection shared with the grading and generation calls. Any GOAWAY or unrelated failure on that connection killed the live interview, surfacing as `NGHTTP2_INTERNAL_ERROR`. The voice path now uses its own client on an isolated connection (`disableConcurrentStreams: true`). Measured after the change: **zero drops** across repeated full-length runs.
+- **Recovery that made things worse.** Every reconnect re-greeted the candidate and skipped ahead, because "questions answered" was counted from speech fragments. The resume note now shows the model the actual transcript tail, and the retry budget resets after each real answer.
+
+When a call does drop, the grader is told. It reports `screenQuality` (`clean` / `degraded` / `compromised`) and can recommend a re-screen, and the scorecard shows that **above** the verdict — so a recruiter never reads a broken call as a weak candidate. That value is clamped to the relay's own drop count, so the model cannot invent degradation on a healthy call.
 
 ## Prototype limitations
 

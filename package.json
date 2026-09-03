@@ -6,12 +6,18 @@
   "scripts": {
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
-    "dev": "npm run start:all",
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build:backend": "npm --prefix backend run build",
     "build:frontend": "npm --prefix frontend run build",
     "build": "npm run build:backend && npm run build:frontend",
     "start:backend": "npm --prefix backend run start",
     "start:frontend": "npm --prefix frontend run start",
-    "start:all": "npx concurrently -n \"backend,frontend\" -c \"cyan,magenta\" \"npm run start:backend\" \"npm run start:frontend\""
+    "start:all": "npx concurrently -n \"backend,frontend\" -c \"cyan,magenta\" \"npm run start:backend\" \"npm run start:frontend\"",
+    "dev:all": "concurrently -n backend,frontend -c blue,magenta \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend exec tsc -- --noEmit",
+    "e2e": "npm --prefix backend run e2e --"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
   }
 }

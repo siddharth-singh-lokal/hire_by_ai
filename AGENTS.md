@@ -20,8 +20,11 @@ frontend/  Next.js 14 App Router, port 3030
 ## Running it
 
 ```bash
+npm run dev              # both, via concurrently
 npm run dev:backend      # :4000  API + Nova Sonic relay
 npm run dev:frontend     # :3030  UI
+npm run typecheck        # tsc --noEmit in backend, harness and frontend
+npm run e2e              # end-to-end interview against the LIVE relay (see Testing)
 ```
 
 Backend needs AWS credentials in `backend/.env` (`AWS_PROFILE=...` or the
@@ -123,6 +126,9 @@ candidate path.
 | `frontend/hooks/useNovaSonicInterview.ts` | Audio capture/playback, WS client |
 | `frontend/public/worklets/` | Mic capture (16kHz) and playback (24kHz) |
 | `frontend/hooks/useProctoring.ts` | MediaPipe face + object detection |
+| `backend/src/languages.ts` | Interview languages, per-language voice and prompt directive |
+| `backend/src/contextPack/role-context/*.md` | Hand-written, human-approved role context for non-backend disciplines |
+| `backend/scripts/e2e.ts` | Drives a whole interview over the WebSocket, no microphone |
 
 There is **no fallback interviewer**. A WebSocket connection without a valid
 prepared session is rejected. Running a generic hardcoded interview against a
@@ -193,6 +199,25 @@ nobody reviewed — refusing is the honest outcome.
   for the whole call. `personaliseOpening` substitutes the admin-entered name;
   legacy banks with a baked-in greeting name get it swapped too.
 
+### Languages
+
+- **Nova Sonic speaks Hindi and English, and no other Indian language.** The AI
+  Service Card lists English, Spanish, German, French, Italian, Portuguese and
+  Hindi, and explicitly advises against the rest. Telugu, Tamil, Kannada,
+  Malayalam, Marathi, Gujarati and Bengali are in `languages.ts` with
+  `sonicSupported: false` and render disabled in the admin picker — the honest
+  next step for them is Sarvam AI (native realtime speech-to-speech for all 22
+  Indian languages) or a Transcribe → LLM → Polly cascade, NOT an unsupported
+  Sonic locale.
+- Voices: `kiara` (f) / `arjun` (m) are the native hi-IN and en-IN voices;
+  `tiffany` / `matthew` are polyglot and code-switch Hinglish mid-sentence,
+  which is why Hinglish uses tiffany. Full enum in the research notes.
+- The bank is always generated in English. Only the **spoken** interview is
+  translated, by a directive in the rendered prompt (`languages.ts`), so
+  grading, the gap matrix and the R1 briefing stay comparable across languages.
+  The grader is told the language and asked to quote verbatim with an English
+  gloss.
+
 ### The live prompt
 
 The agent is deliberately **not** given `intent`, `strongAnswer` or
@@ -243,6 +268,25 @@ withholding them costs nothing.
   date plus a cache-key version identifies an incident with every hostname
   removed. Regex cannot catch that; the adversarial LLM pass exists for it.
 
+### Grading
+
+- **`screenQuality` is clamped to the relay's drop count.** The model may
+  escalate a call we already know dropped, but it may not invent degradation on
+  a clean one — it did exactly that on a zero-drop run, reading ordinary spoken
+  fragmentation as a connection fault, which would have put a "connection
+  problems" banner on a healthy screen. `assessCallQuality` in `evaluate.ts` is
+  the authority; see the clamp at the bottom of `evaluateInterview`.
+- **Role context fills the gap the Context Pack cannot.** The pack is built from
+  engineering documents, so it only ever yields backend/infra scenarios — a
+  Product Analyst was getting connection-pooling questions. PRDs cannot fix
+  that: the sanitizer rejects business logic by design and correctly returns no
+  scenarios for them. `contextPack/role-context/{product,data,mobile,frontend}.md`
+  are therefore hand-written at the same trust level as `company-profile.md`,
+  bypass sanitization because there is nothing in them to sanitize, and describe
+  the *shape* of the work (low-end devices, ten languages, lossy mobile events)
+  with no metric, price or experiment result. A human reviews them; that review
+  IS the approval step.
+
 ### Proctoring
 
 - Phone detection requires **2s sustained** detection. Object detectors
@@ -281,16 +325,34 @@ withholding them costs nothing.
 
 ## Testing
 
-There is no test suite. Verification is done by running things:
-
 ```bash
-npm run verify:redaction    # the one real regression test
-npx tsc --noEmit            # in both backend/ and frontend/
+npm run typecheck                  # backend + harness + frontend
+npm run e2e                        # one full interview against the live relay
+npm run e2e -- --loop 3            # measure the Bedrock drop rate
+npm run e2e -- --lang hi           # Hindi run; writes backend/e2e-hi.wav to listen to
+npm run e2e -- --session <id>      # drive a session prepared in the admin UI
+npm --prefix backend run verify:redaction   # the Context Pack regression test
 ```
 
-For anything touching the voice path, **test against the live relay** — every
-failure mode listed above was found by running real audio through it, not by
-reading code. Reading the code would not have revealed any of them.
+**`backend/scripts/e2e.ts` is the only automated test of the voice path**, and it
+deliberately does not mock Bedrock — every failure mode in this file was found by
+running a real stream, and a mock would have hidden all of them. It connects to
+the relay exactly as the browser does, answers with scripted turns, and asserts
+on the resulting scorecard (verdict, one axis score per rubric axis,
+`screenQuality`, and `streamDrops` matching what the client observed).
+
+Two things it relies on:
+
+- **It must stream silence.** Sonic's VAD closes a turn only when it hears
+  audio stop, so a text-only turn with no `audioInput` never gets a reply — the
+  run just hangs. The harness sends a 1024-byte zero frame every 32 ms.
+- **`POST /api/dev/prepare-from-bank`** creates a session from a checked-in bank
+  fixture, skipping the ~50 s generation, so a loop is repeatable and comparable.
+  It is guarded on `NODE_ENV !== "production"`. Sessions live in the server
+  process's memory, so the harness cannot call `createSession` directly.
+
+Still verify by hand in a browser before demoing: proctoring, the audio worklets
+and barge-in only exist there.
 
 ## Prototype limitations (deliberate)
 
@@ -303,5 +365,9 @@ reading code. Reading the code would not have revealed any of them.
 - No database. `.sessions.json` is a convenience mirror, not storage — no
   concurrency control, rewrites the whole file per change.
 - No auth on `/admin`.
+- The candidate's URL carries **only** the opaque session id. Name, duration and
+  language are fetched from `GET /api/candidate/session/:id`; they used to ride
+  in the query string, where a candidate could edit their own timer and a
+  missing param silently meant a 30-minute interview.
 - Voice-only. R0 tests reasoning, not implementation.
 - Local credentials only. Deploying needs real IAM.

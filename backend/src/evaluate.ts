@@ -27,6 +27,8 @@ interface EvaluateInput {
   orgGrounded: boolean;
   /** Times the voice stream dropped and was re-established mid-call. */
   streamDrops: number;
+  /** Human label of the language the interview was conducted in. */
+  interviewLanguage?: string;
 }
 
 /**
@@ -68,7 +70,8 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 - **A skill they did not list but clearly have is a PLUS.** Resumes undersell constantly. Credit demonstrated ability regardless of whether it was claimed.
 - **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
 - **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
-- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
+${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** The transcript is in that language. Assess the CONTENT of the answers exactly as you would in English — depth, ownership, reasoning — and never treat the choice of language, or code-switching with English, as a weakness. Quote evidence verbatim in the original script and add a short English gloss in parentheses in your justification so a non-speaker can follow.
+` : ""}- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
 
 THE SIGNAL THAT MATTERS MOST
 The single most valuable thing you can detect is a MISMATCH between what the resume claims and what the person can actually discuss. Someone who did the work can explain a decision they rejected and why. Someone narrating a README cannot. Weight that heavily. Everything else is secondary.
@@ -190,15 +193,32 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
 
   const parsed = extractJson(text);
 
-  const modelQuality = ["clean", "degraded", "compromised"].includes(parsed.screenQuality)
-    ? parsed.screenQuality
-    : assessCallQuality(input);
+  /**
+   * screenQuality is a claim about the PLATFORM, and the relay's drop count is
+   * the only authority on that. The model may escalate a call we already know
+   * was interrupted (it can see how much usable conversation survived), but it
+   * may not invent degradation on a call that never dropped — it did exactly
+   * that on a clean run, reading ordinary spoken fragmentation as a connection
+   * fault, which would have put a "connection problems" banner on a healthy
+   * screen.
+   */
+  const deterministic = assessCallQuality(input);
+  const severity = { clean: 0, degraded: 1, compromised: 2 } as const;
+  const claimed = ["clean", "degraded", "compromised"].includes(parsed.screenQuality)
+    ? (parsed.screenQuality as keyof typeof severity)
+    : deterministic;
+  const modelQuality =
+    deterministic === "clean"
+      ? "clean"
+      : severity[claimed] >= severity[deterministic]
+      ? claimed
+      : deterministic;
 
   return {
     ...parsed,
     screenQuality: modelQuality,
     rescreenRecommended: Boolean(parsed.rescreenRecommended),
-    screenQualityNote: String(parsed.screenQualityNote || ""),
+    screenQualityNote: modelQuality === "clean" ? "" : String(parsed.screenQualityNote || ""),
     streamDrops: input.streamDrops,
     candidateName: input.candidateName,
     role: input.bank.role,

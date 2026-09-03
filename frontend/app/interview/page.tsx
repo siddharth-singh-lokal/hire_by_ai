@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   Mic,
   MicOff,
@@ -26,7 +27,8 @@ import {
   RED_FLAG_WARNINGS,
   type RedFlag,
 } from "@/lib/sessionStore";
-import { completeInterview } from "@/lib/api";
+import { completeInterview, fetchCandidateSession, type CandidateSessionDetail } from "@/lib/api";
+import { languagePhrase } from "@/lib/languages";
 import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
 
 /**
@@ -57,8 +59,48 @@ function InterviewRoom() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("sessionId");
-  const candidateName = searchParams.get("name") || "there";
-  const durationMinutes = Number(searchParams.get("duration")) || 30;
+  // Testing aid, off unless explicitly asked for: ?debug=1
+  const debugMode = searchParams.get("debug") === "1";
+
+  /**
+   * Everything about the interview is looked up server-side from the opaque
+   * session id. It used to travel in the URL, which meant a candidate could
+   * edit their own name and timer, and a missing param silently produced a
+   * 30-minute interview regardless of what was prepared.
+   */
+  const [session, setSession] = useState<CandidateSessionDetail | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setSessionError("No interview session found. Please go back and sign in with your email.");
+      setSessionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    fetchCandidateSession(sessionId)
+      .then((s) => {
+        if (cancelled) return;
+        setSession(s);
+        setSessionLoading(false);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setSessionError(e?.message || "Could not load this interview.");
+        setSessionLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  const candidateName = session?.candidateName ?? "";
+  const durationMinutes = session?.durationMinutes ?? 0;
+  const isRejoin = session?.status === "in_progress";
+  const isAlreadyDone =
+    session?.status === "completed" || session?.status === "grading";
+  const wasInterrupted = session?.status === "terminated";
 
   const {
     connectionState,
@@ -93,11 +135,28 @@ function InterviewRoom() {
   const [timeUp, setTimeUp] = useState(false);
 
   const totalSeconds = durationMinutes * 60;
-  const [secondsRemaining, setSecondsRemaining] = useState(totalSeconds);
+  const [secondsRemaining, setSecondsRemaining] = useState(0);
+
 
   const isLive = connectionState === "active";
   const startedAtRef = useRef(0);
   const elapsedSeconds = totalSeconds - secondsRemaining;
+
+  // Seed the clock from the SERVER's start time so a mid-interview refresh
+  // resumes the real remaining time instead of restarting from full.
+  useEffect(() => {
+    if (!session) return;
+    const total = session.durationMinutes * 60;
+    if (session.status === "in_progress" && session.startedAt) {
+      const skew = Date.now() - session.serverNow;
+      const startedAtLocal = session.startedAt + skew;
+      startedAtRef.current = startedAtLocal;
+      const elapsed = Math.floor((Date.now() - startedAtLocal) / 1000);
+      setSecondsRemaining(Math.max(0, total - elapsed));
+    } else {
+      setSecondsRemaining(total);
+    }
+  }, [session]);
 
   const getElapsedSeconds = useCallback(() => {
     if (!startedAtRef.current) return 0;
@@ -158,7 +217,8 @@ function InterviewRoom() {
       }
 
       try {
-        localStorage.setItem("interview_candidate_name", candidateName);
+        if (candidateName) localStorage.setItem("interview_candidate_name", candidateName);
+        else localStorage.removeItem("interview_candidate_name");
       } catch (e) {
         console.error("Storage error:", e);
       }
@@ -273,7 +333,10 @@ function InterviewRoom() {
 
   useEffect(() => {
     if (isLive && localStream && !isRecording) {
-      startedAtRef.current = Date.now();
+      // Only set it if the rejoin effect has not already seeded it from the
+      // server, so elapsed time (and every proctoring flag timestamp) stays on
+      // the real interview timeline.
+      if (!startedAtRef.current) startedAtRef.current = Date.now();
       startRecording(localStream);
     }
   }, [isLive, localStream, isRecording, startRecording]);
@@ -348,31 +411,78 @@ function InterviewRoom() {
 
   // ---------------------------------------------------------------- lobby --
   if (!hasStarted || connectionState === "idle") {
+    const langPhrase = languagePhrase(session?.language);
+    const blocked = sessionLoading || !session || isAlreadyDone;
+
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
         <div className="max-w-md w-full text-center">
           <div className="w-14 h-14 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center mx-auto mb-5">
             <Video className="w-6 h-6 text-indigo-400" />
           </div>
-          <h1 className="text-xl font-bold">Hi {candidateName}</h1>
-          <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-            This is a {durationMinutes}-minute conversation with an AI interviewer about
-            your experience. It's a first-round chat, not a test — think out loud, and
-            it's completely fine to say you're not sure.
-          </p>
 
-          <div className="mt-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-left space-y-2">
-            {[
-              "Your camera and microphone stay on throughout",
-              "The session is recorded for the hiring team",
-              "You can ask to stop at any point",
-            ].map((line) => (
-              <p key={line} className="text-xs text-slate-400 flex gap-2">
-                <span className="text-slate-600">•</span>
-                {line}
+          {sessionLoading ? (
+            <>
+              <h1 className="text-xl font-bold">Getting your interview ready</h1>
+              <p className="text-sm text-slate-400 mt-2">One moment.</p>
+            </>
+          ) : sessionError ? (
+            <>
+              <h1 className="text-xl font-bold">We couldn&apos;t find your interview</h1>
+              <p className="text-sm text-slate-400 mt-2 leading-relaxed">{sessionError}</p>
+              <Link
+                href="/"
+                className="mt-6 inline-block w-full py-3 rounded-xl text-sm font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700"
+              >
+                Back to sign in
+              </Link>
+            </>
+          ) : isAlreadyDone ? (
+            <>
+              <h1 className="text-xl font-bold">This interview is already complete</h1>
+              <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+                Thanks, {candidateName} — your conversation has been sent to the hiring
+                team. There is nothing more to do here.
               </p>
-            ))}
-          </div>
+            </>
+          ) : isRejoin ? (
+            <>
+              <h1 className="text-xl font-bold">Your interview is in progress</h1>
+              <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+                You were disconnected. Rejoin and the interviewer will pick up where you
+                left off — you have {formatTime(secondsRemaining)} remaining.
+              </p>
+            </>
+          ) : (
+            <>
+              <h1 className="text-xl font-bold">Hi {candidateName}</h1>
+              <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+                This is a {durationMinutes}-minute conversation with an AI interviewer
+                about your experience
+                {langPhrase ? `, ${langPhrase}` : ""}. It&apos;s a first-round chat, not a
+                test — think out loud, and it&apos;s completely fine to say you&apos;re
+                not sure.
+              </p>
+            </>
+          )}
+
+          {session && !isAlreadyDone && (
+            <div className="mt-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-left space-y-2">
+              {[
+                "Your camera and microphone stay on throughout",
+                "The session is recorded for the hiring team",
+                "You can ask to stop at any point",
+                ...(wasInterrupted
+                  ? ["Your earlier conversation was saved and will be included"]
+                  : []),
+              ].map((line) => (
+                <p key={line} className="text-xs text-slate-400 flex gap-2">
+                  <span className="text-slate-600">•</span>
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
 
           {error && (
             <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 text-left">
@@ -381,17 +491,15 @@ function InterviewRoom() {
             </div>
           )}
 
-          <button
-            onClick={handleLaunch}
-            className="mt-6 w-full py-3 rounded-xl text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 transition-colors shadow-lg shadow-indigo-600/20"
-          >
-            I'm ready — start
-          </button>
-
-          {!sessionId && (
-            <p className="mt-3 text-[11px] text-amber-400/80">
-              No interview session found. Please go back and sign in with your email.
-            </p>
+          {!sessionError && !isAlreadyDone && (
+            <button
+              onClick={handleLaunch}
+              disabled={blocked}
+              className="mt-6 w-full py-3 rounded-xl text-sm font-semibold bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 transition-colors shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2"
+            >
+              {sessionLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {sessionLoading ? "Loading…" : isRejoin ? "Rejoin interview" : "I'm ready — start"}
+            </button>
           )}
         </div>
       </div>
@@ -559,6 +667,7 @@ function InterviewRoom() {
 
       {/* Controls */}
       <footer className="border-t border-slate-800/80 bg-slate-900/50 flex flex-col items-center justify-center gap-3 shrink-0 py-3 px-4">
+        {debugMode && (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -571,7 +680,7 @@ function InterviewRoom() {
           <input
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
-            placeholder="Type a reply instead of speaking (for testing)…"
+            placeholder="Type a reply instead of speaking…"
             className="flex-1 rounded-full bg-slate-950/60 border border-slate-800 focus:border-slate-600 focus:outline-none px-4 py-2 text-xs placeholder:text-slate-600"
           />
           <button
@@ -582,6 +691,7 @@ function InterviewRoom() {
             Send
           </button>
         </form>
+        )}
 
         <div className="flex items-center justify-center gap-3">
         <button

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef } from "react";
-import { Sparkles, Bot, Mic, Radio } from "lucide-react";
+import { Sparkles, Bot, Mic } from "lucide-react";
 
 interface AudioReactiveVisualizerProps {
   isAiSpeaking: boolean;
@@ -20,6 +20,24 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  /**
+   * The animation loop reads the CURRENT volumes through refs.
+   *
+   * These props change ~20x/sec (the meter tick). With them in the effect's
+   * dependency array the whole rAF loop was torn down and rebuilt 20 times a
+   * second, and `phase` — which drives the wave's travel — reset to 0 each
+   * time, so the waveform juddered in place instead of scrolling. Refs keep the
+   * loop alive for the life of the component.
+   */
+  const aiVolumeRef = useRef(aiVolume);
+  const userVolumeRef = useRef(userVolume);
+  const aiSpeakingRef = useRef(isAiSpeaking);
+  const userSpeakingRef = useRef(isUserSpeaking);
+  aiVolumeRef.current = aiVolume;
+  userVolumeRef.current = userVolume;
+  aiSpeakingRef.current = isAiSpeaking;
+  userSpeakingRef.current = isUserSpeaking;
+
   // Dynamic canvas drawing for audio frequency waveform
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -35,9 +53,15 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
-      // Determine active amplitude based on who is speaking
-      const activeVolume = isAiSpeaking ? aiVolume : isUserSpeaking ? userVolume : 0.05;
-      const isAI = isAiSpeaking;
+      // Read through refs, never props — see the note above.
+      const speakingAi = aiSpeakingRef.current;
+      const speakingUser = userSpeakingRef.current;
+      const activeVolume = speakingAi
+        ? aiVolumeRef.current
+        : speakingUser
+        ? userVolumeRef.current
+        : 0.05;
+      const isAI = speakingAi;
 
       // Draw multi-layered sine waves
       const lines = 3;
@@ -48,7 +72,7 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
         // Color gradient based on speaker
         if (isAI) {
           ctx.strokeStyle = `rgba(129, 140, 248, ${0.4 + i * 0.25})`; // Indigo/violet
-        } else if (isUserSpeaking) {
+        } else if (speakingUser) {
           ctx.strokeStyle = `rgba(52, 211, 153, ${0.4 + i * 0.25})`; // Emerald
         } else {
           ctx.strokeStyle = `rgba(99, 102, 241, ${0.2 + i * 0.1})`; // Gentle standby purple
@@ -82,7 +106,10 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
     return () => {
       cancelAnimationFrame(animId);
     };
-  }, [isAiSpeaking, isUserSpeaking, aiVolume, userVolume]);
+    // Deliberately empty: the loop lives for the component's lifetime and reads
+    // volumes through refs. Adding the volumes here rebuilds it 20x/sec.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Scaled pulse calculation
   const pulseScale = 1 + Math.min(aiVolume * 0.35, 0.35);
@@ -136,19 +163,20 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
       {/* Central Pulsing Sphere */}
       <div className="relative z-10 flex items-center justify-center mb-6">
         {/* Outer concentric pulsing aura rings */}
+        {/* Scaled via transform rather than width/height: animating the box
+            dimensions forces layout on every meter tick, which competes with
+            the audio path on the main thread. transform is composited. */}
         <div
-          className="absolute rounded-full border border-indigo-500/20 transition-all duration-150"
+          className="absolute rounded-full border border-indigo-500/20 transition-transform duration-150 w-[210px] h-[210px]"
           style={{
-            width: `${210 * pulseScale}px`,
-            height: `${210 * pulseScale}px`,
+            transform: `scale(${pulseScale})`,
             opacity: isAiSpeaking ? 0.8 : 0.2,
           }}
         />
         <div
-          className="absolute rounded-full border border-indigo-400/30 transition-all duration-100"
+          className="absolute rounded-full border border-indigo-400/30 transition-transform duration-100 w-[170px] h-[170px]"
           style={{
-            width: `${170 * pulseScale}px`,
-            height: `${170 * pulseScale}px`,
+            transform: `scale(${pulseScale})`,
             opacity: isAiSpeaking ? 0.9 : 0.3,
           }}
         />

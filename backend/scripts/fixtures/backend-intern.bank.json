@@ -1,0 +1,115 @@
+{
+  "generatedAt": "2026-09-03T17:24:40.726Z",
+  "role": "Backend Intern",
+  "seniority": "intern",
+  "durationMinutes": 5,
+  "rubric": [
+    {
+      "name": "Project Depth",
+      "rationale": "Candidate lists several MERN projects; we need to know if they genuinely built and understood the backend, or just followed a tutorial.",
+      "strongSignal": "Can explain a specific technical decision they made — e.g. why they chose a particular data model, how they handled auth tokens, or a bug they debugged — with enough detail that it's clear they wrote the code.",
+      "weakSignal": "Describes features at a surface level ('I built login and signup') without being able to explain any implementation choice or problem they hit.",
+      "generated": false
+    },
+    {
+      "name": "Technical Knowledge",
+      "rationale": "Role requires REST APIs and basic database concepts from day one.",
+      "strongSignal": "Can explain what a REST endpoint does, what an HTTP status code means in context, or why a database query might be slow — in their own words, not textbook definitions.",
+      "weakSignal": "Recites definitions without being able to apply them to a concrete example from their own work.",
+      "generated": false
+    },
+    {
+      "name": "Problem-Solving Mindset",
+      "rationale": "Intern role explicitly values curiosity, failing fast, and learning faster — the scenario tests whether they can reason through an unfamiliar problem rather than recall a memorised answer.",
+      "strongSignal": "Breaks the scenario into smaller parts, makes a reasonable hypothesis, and identifies what they'd check first — even if they don't reach the full answer.",
+      "weakSignal": "Freezes or immediately says 'I don't know' without attempting to reason through it or jumps to a solution without diagnosing the problem.",
+      "generated": false
+    },
+    {
+      "name": "Stack Fit",
+      "rationale": "The role is Python/Django; the candidate's background is Node.js/Express. We need to gauge their openness and ability to transfer concepts.",
+      "strongSignal": "Acknowledges the gap honestly, draws a clear parallel between Express/Node and Django/Python (e.g. middleware, ORM vs raw queries), and expresses genuine interest in picking it up.",
+      "weakSignal": "Either oversells Python familiarity they don't have, or shows no awareness that the stack is different from what they've used.",
+      "generated": false
+    },
+    {
+      "name": "Communication",
+      "rationale": "Engineers here collaborate in small pods and need to articulate technical ideas clearly.",
+      "strongSignal": "Explains their work in plain terms without jargon overload can adjust the level of detail when asked a follow-up.",
+      "weakSignal": "Gives one-word answers, rambles without a clear point, or can't summarise what their project actually does in two sentences.",
+      "generated": false
+    },
+    {
+      "name": "Learning Velocity",
+      "rationale": "JD explicitly states 'failing fast and learning faster' as a core expectation for this intern role; the candidate will be picking up Python, Django, and production backend patterns from scratch.",
+      "strongSignal": "Gives a concrete example of picking up an unfamiliar technology or concept for a project — describes what they didn't know, how they figured it out, and what they'd do differently.",
+      "weakSignal": "Cannot point to a specific instance of self-directed learning, or attributes all learning to coursework rather than personal initiative.",
+      "generated": true
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "kind": "resume_probe",
+      "question": "Your WeChat app uses Socket.io for real-time messaging. Walk me through what actually happens on the server side when User A sends a message to User B — from the moment the message arrives at your Node.js server to the moment User B's screen updates.",
+      "intent": "Verify that the candidate genuinely implemented the real-time backend and understands the event-driven flow, not just the frontend UI.",
+      "axes": [
+        "Project Depth",
+        "Technical Knowledge",
+        "Communication"
+      ],
+      "escalations": [
+        "How did you handle the case where User B is offline when the message is sent — did you persist the message, and if so, how?",
+        "If two users sent messages to each other at exactly the same time, could there be any ordering issue? How would you think about that?"
+      ],
+      "fallback": "Can you describe what Socket.io is doing differently from a regular HTTP request — why did you need it for this feature?",
+      "strongAnswer": [
+        "Describes the server receiving a socket event (e.g. 'sendMessage'), identifying the target user's socket ID or room, persisting the message to MongoDB, and emitting an event to the recipient's socket. Mentions error handling or at least acknowledges what would happen if the recipient is disconnected. Shows they wrote this code themselves by referencing a specific detail — a field name, a bug they hit, a design choice."
+      ],
+      "weakAnswer": [
+        "Says 'Socket.io handles it automatically' or describes only the frontend side. Cannot explain how the server knows which socket belongs to User B, or has no idea how the message gets stored."
+      ],
+      "minutes": 2
+    },
+    {
+      "id": "q2",
+      "kind": "scenario",
+      "question": "Imagine you've just joined and you're asked to look into a strange production issue. Every afternoon at roughly the same time, the database CPU spikes hard and a bunch of API calls start failing with 500 errors — then it calms down after a minute or two. It's been happening daily for a week. The team tells you there's an expensive database query whose results are cached in Redis for 24 hours, and the cache is only refreshed when an admin saves something in the dashboard. Where would you start investigating, and what do you think might be going on?",
+      "intent": "Test whether the candidate can reason about a caching and database load problem from first principles — not recall a memorised answer, but think through cause and effect.",
+      "axes": [
+        "Problem-Solving Mindset",
+        "Technical Knowledge"
+      ],
+      "escalations": [
+        "You've figured out the cache is expiring at the same time every day. What's one thing you could change about the cache setup to stop all the database hits from happening at exactly the same moment?",
+        "If you added a lock so only one server process runs the expensive query when the cache is empty, what happens to all the other requests that arrive while that query is running?"
+      ],
+      "fallback": "What does it mean for something to be 'cached'? If the cache is empty and ten requests arrive at the same time for the same data, what do you think each of those requests does?",
+      "strongAnswer": [
+        "Identifies that the cache is probably expiring at a fixed time each day (anchored to when it was last written), causing all requests to hit the database simultaneously when the cache is cold. Uses the word 'stampede' or describes the concept even without the term. Suggests at least one mitigation — adding jitter to the TTL, a background job to refresh before expiry, or a lock so only one process regenerates the cache. Reasoning is logical even if vocabulary is imprecise."
+      ],
+      "weakAnswer": [
+        "Suggests only 'make the query faster' or 'increase the cache TTL' without understanding why the spike is periodic. Cannot explain why multiple requests hitting an empty cache is worse than one request doing so. Treats it as a pure database performance problem with no connection to the caching layer."
+      ],
+      "scenarioId": "cache-stampede-fixed-ttl",
+      "minutes": 2
+    }
+  ],
+  "claimsToVerify": [
+    {
+      "claim": "Built real-time messaging with Socket.io and WebSockets in WeChat app",
+      "jdRequirement": "Work with real-time data; build APIs and microservices"
+    },
+    {
+      "claim": "Implemented role-based access control and secure authentication in the appointment platform",
+      "jdRequirement": "Understand REST APIs and basic database concepts"
+    }
+  ],
+  "unevidencedRequirements": [
+    "Python (candidate's stack is entirely JavaScript/Node.js — no Python projects or coursework mentioned)",
+    "Django, Flask, or FastAPI experience (listed as bonus; no evidence on resume)",
+    "Docker or AWS exposure (listed as bonus; no evidence on resume)",
+    "CI/CD familiarity (listed as bonus; no evidence on resume)"
+  ],
+  "openingLine": "Hi {{name}}, good to meet you — we have about five minutes today. I will ask you one question about a project on your resume, then a short scenario to reason through."
+}

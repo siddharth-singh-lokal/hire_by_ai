@@ -217,7 +217,8 @@ function Scorecard() {
           {/* Call quality — shown before anything else when the platform, not the
               candidate, shaped this transcript. A recruiter must never reject
               someone because the voice stream dropped four times. */}
-          {evaluation.screenQuality && evaluation.screenQuality !== "clean" && (
+          {(evaluation.rescreenRecommended ||
+            (evaluation.screenQuality && evaluation.screenQuality !== "clean")) && (
             <section
               className={`p-4 rounded-2xl border flex gap-3 ${
                 evaluation.screenQuality === "compromised"
@@ -238,7 +239,9 @@ function Scorecard() {
                 >
                   {evaluation.screenQuality === "compromised"
                     ? "This screen was compromised by connection problems"
-                    : "This screen had connection problems"}
+                    : evaluation.screenQuality === "degraded"
+                    ? "This screen had connection problems"
+                    : "This screen did not gather enough to judge"}
                   {typeof evaluation.streamDrops === "number" && evaluation.streamDrops > 0
                     ? ` — the voice stream dropped ${evaluation.streamDrops} time${
                         evaluation.streamDrops === 1 ? "" : "s"

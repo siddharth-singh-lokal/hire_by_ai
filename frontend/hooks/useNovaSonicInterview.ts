@@ -349,6 +349,22 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             setAiVolume(0);
             setError(null);
             setReconnecting(true);
+            // The candidate otherwise just hears silence and assumes they broke
+            // something. One system line in the transcript, once per drop.
+            setTranscripts((prev) =>
+              prev.length && prev[prev.length - 1].id.startsWith("sys-drop")
+                ? prev
+                : [
+                    ...prev,
+                    {
+                      id: `sys-drop-${Date.now()}`,
+                      sender: "interviewer",
+                      text: "Reconnecting… hold on a moment, we'll pick up where we left off.",
+                      timestamp: Date.now(),
+                      isFinal: true,
+                    },
+                  ]
+            );
             console.warn(`[audio] voice stream dropped, reconnecting (attempt ${msg.attempt})`);
             break;
 
