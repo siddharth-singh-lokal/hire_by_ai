@@ -126,6 +126,42 @@ export async function getAdminSession(id: string): Promise<any> {
   return (await res.json()).session;
 }
 
+export interface ShortlistCandidate {
+  id: string;
+  candidateName: string;
+  candidateEmail: string;
+  language: string;
+  status: string;
+  durationSeconds?: number;
+  verdict?: string;
+  overallScore?: number;
+  summary?: string;
+  recommendationReason?: string;
+  topStrength?: string;
+  topConcern?: string;
+  requirements: { requirement: string; status: string }[];
+  evidenced: number;
+  contradicted: number;
+  requirementCount: number;
+  screenQuality?: "clean" | "degraded" | "compromised";
+  rescreenRecommended?: boolean;
+  graded: boolean;
+}
+
+export interface ShortlistRole {
+  role: string;
+  total: number;
+  graded: number;
+  advancing: number;
+  candidates: ShortlistCandidate[];
+}
+
+export async function fetchShortlist(): Promise<ShortlistRole[]> {
+  const res = await fetch(`${BACKEND_URL}/api/admin/shortlist`);
+  if (!res.ok) throw new Error("Could not load the shortlist.");
+  return (await res.json()).roles;
+}
+
 export interface PrepareResult {
   success: boolean;
   sessionId: string;

@@ -19,6 +19,10 @@ import {
   Copy,
   Check,
   Languages,
+  ListOrdered,
+  CheckCircle,
+  XCircle,
+  MinusCircle,
 } from "lucide-react";
 import { LANGUAGES, languageLabel } from "@/lib/languages";
 import {
@@ -26,6 +30,8 @@ import {
   extractPdfText,
   fetchContextPack,
   listAdminSessions,
+  fetchShortlist,
+  type ShortlistRole,
   type QuestionBank,
   type ContextPackSummary,
   type AdminSessionRow,
@@ -126,7 +132,8 @@ function DocumentInput({
 }
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<"new" | "interviews">("new");
+  const [tab, setTab] = useState<"new" | "interviews" | "shortlist">("new");
+  const [shortlist, setShortlist] = useState<ShortlistRole[]>([]);
 
   const [candidateName, setCandidateName] = useState("");
   const [candidateEmail, setCandidateEmail] = useState("");
@@ -153,6 +160,14 @@ export default function AdminPage() {
   const refreshSessions = useCallback(() => {
     listAdminSessions().then(setSessions).catch(() => setSessions([]));
   }, []);
+
+  useEffect(() => {
+    if (tab !== "shortlist") return;
+    const load = () => fetchShortlist().then(setShortlist).catch(() => setShortlist([]));
+    load();
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, [tab]);
 
   useEffect(() => {
     if (tab !== "interviews") return;
@@ -233,11 +248,12 @@ export default function AdminPage() {
             [
               ["new", "New interview", <Plus key="p" className="w-3.5 h-3.5" />],
               ["interviews", "All interviews", <Users key="u" className="w-3.5 h-3.5" />],
+              ["shortlist", "Shortlist", <ListOrdered key="l" className="w-3.5 h-3.5" />],
             ] as const
           ).map(([key, label, icon]) => (
             <button
               key={key}
-              onClick={() => setTab(key as "new" | "interviews")}
+              onClick={() => setTab(key as "new" | "interviews" | "shortlist")}
               className={`flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors ${
                 tab === key
                   ? "text-white border-indigo-500"
@@ -252,7 +268,149 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
-        {tab === "new" ? (
+        {tab === "shortlist" ? (
+          /* ------------------ ranked shortlist ------------------ */
+          <div className="space-y-8">
+            <div>
+              <h2 className="text-base font-bold">Shortlist</h2>
+              <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
+                Every screened candidate for a role, ordered by what to do next
+                rather than by score — an &ldquo;advance with focus&rdquo; at 62 comes before a
+                &ldquo;needs discussion&rdquo; at 68. The chips show which of the role&apos;s stated
+                requirements the conversation actually established.
+              </p>
+            </div>
+
+            {shortlist.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-800 p-10 text-center">
+                <p className="text-sm text-slate-500">No interviews prepared yet.</p>
+              </div>
+            ) : (
+              shortlist.map((group) => (
+                <section key={group.role} className="space-y-2">
+                  <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                    <h3 className="text-sm font-bold text-slate-200">{group.role}</h3>
+                    <p className="text-[11px] text-slate-500">
+                      {group.graded} of {group.total} screened
+                      {group.graded > 0 && (
+                        <>
+                          {" · "}
+                          <span className="text-emerald-400 font-semibold">
+                            {group.advancing} worth an interview
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-800 overflow-hidden">
+                    {group.candidates.map((c, i) => (
+                      <Link
+                        key={c.id}
+                        href={`/scorecard?sessionId=${c.id}`}
+                        className={`flex items-start gap-4 px-5 py-4 transition-colors hover:bg-slate-800/50 ${
+                          i % 2 ? "bg-slate-900/20" : "bg-slate-900/40"
+                        }`}
+                      >
+                        <span
+                          className={`shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
+                            !c.graded
+                              ? "bg-slate-800 text-slate-500"
+                              : i === 0
+                              ? "bg-emerald-500/20 text-emerald-300"
+                              : "bg-slate-800 text-slate-400"
+                          }`}
+                        >
+                          {c.graded ? i + 1 : "–"}
+                        </span>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2 flex-wrap">
+                            <p className="text-xs font-semibold text-slate-100 truncate">
+                              {c.candidateName}
+                            </p>
+                            {c.language && c.language !== "en" && (
+                              <span className="text-[10px] text-slate-500">
+                                interviewed in {languageLabel(c.language)}
+                              </span>
+                            )}
+                            {c.rescreenRecommended && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 font-semibold">
+                                re-screen
+                              </span>
+                            )}
+                          </div>
+
+                          {c.graded ? (
+                            <>
+                              <p className="mt-1 text-[11px] text-slate-400 leading-relaxed line-clamp-2">
+                                {c.recommendationReason || c.summary}
+                              </p>
+                              {c.requirements.length > 0 && (
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {c.requirements.slice(0, 5).map((r, k) => (
+                                    <span
+                                      key={k}
+                                      title={`${r.requirement} — ${r.status}`}
+                                      className={`inline-flex items-center gap-1 max-w-[220px] px-1.5 py-0.5 rounded text-[10px] border ${
+                                        r.status === "evidenced"
+                                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                                          : r.status === "contradicted"
+                                          ? "bg-rose-500/10 text-rose-300 border-rose-500/30"
+                                          : r.status === "partial"
+                                          ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+                                          : "bg-slate-800/60 text-slate-400 border-slate-700"
+                                      }`}
+                                    >
+                                      {r.status === "evidenced" ? (
+                                        <CheckCircle className="w-2.5 h-2.5 shrink-0" />
+                                      ) : r.status === "contradicted" ? (
+                                        <XCircle className="w-2.5 h-2.5 shrink-0" />
+                                      ) : (
+                                        <MinusCircle className="w-2.5 h-2.5 shrink-0" />
+                                      )}
+                                      <span className="truncate">{r.requirement}</span>
+                                    </span>
+                                  ))}
+                                  {c.requirements.length > 5 && (
+                                    <span className="text-[10px] text-slate-600 self-center">
+                                      +{c.requirements.length - 5} more
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <p className="mt-1 text-[11px] text-slate-600">
+                              {c.status === "ready"
+                                ? "Has not taken the interview yet"
+                                : c.status.replace("_", " ")}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="shrink-0 w-36 text-right">
+                          {c.verdict ? (
+                            <>
+                              <p className="text-[11px] font-semibold text-slate-200">
+                                {c.verdict}
+                              </p>
+                              <p className="text-[10px] text-slate-500">
+                                {c.overallScore}/100 · {c.evidenced}/{c.requirementCount} met
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-[10px] text-slate-600">—</p>
+                          )}
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </section>
+              ))
+            )}
+          </div>
+        ) : tab === "new" ? (
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_440px] gap-8 items-start">
             <section className="space-y-5">
               <div>

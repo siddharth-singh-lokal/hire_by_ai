@@ -257,9 +257,12 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 // 1b-iii. Admin list of every prepared interview and its outcome.
-app.get("/api/admin/sessions", (_req: Request, res: Response) => {
+app.get("/api/admin/sessions", (req: Request, res: Response) => {
+  const includeTest = req.query.includeTest === "1";
   return res.json({
-    sessions: listSessions().map((s) => ({
+    sessions: listSessions()
+      .filter((s) => includeTest || !isHarnessSession(s.candidateEmail))
+      .map((s) => ({
       id: s.id,
       candidateName: s.candidateName,
       candidateEmail: s.candidateEmail,
@@ -280,6 +283,99 @@ app.get("/api/admin/sessions", (_req: Request, res: Response) => {
       language: s.language || "en",
     })),
   });
+});
+
+/**
+ * Ranked shortlist per role — the recruiter's actual question.
+ *
+ * The flat session list answers "how did this one candidate do". An employer
+ * with forty applicants asks a different question: "who should I call first,
+ * and who has the things I said were mandatory". That is the whole point of
+ * screening at volume, so it gets its own endpoint rather than being left as
+ * something a human eyeballs down a list.
+ *
+ * Ordering is by advancement recommendation first, then confidence — never by
+ * score alone, because a 62 that reads "Advance with focus" outranks a 68 that
+ * reads "Needs discussion", and sorting on the number would invert them.
+ */
+/**
+ * Sessions the e2e harness created. They are real interviews and worth keeping
+ * for debugging, but a demo showing fourteen identically-named "E2E Candidate"
+ * rows reads as broken. Matched on the exact address the dev route generates,
+ * so nothing a human typed is ever hidden. `?includeTest=1` shows them.
+ */
+const isHarnessSession = (email: string) =>
+  /^e2e\+[^@]*@example\.test$/i.test(email || "");
+
+app.get("/api/admin/shortlist", (req: Request, res: Response) => {
+  const includeTest = req.query.includeTest === "1";
+  const VERDICT_RANK: Record<string, number> = {
+    Advance: 0,
+    "Advance with focus": 1,
+    "Needs discussion": 2,
+    "Do not advance": 3,
+  };
+
+  const byRole = new Map<string, any[]>();
+
+  for (const s of listSessions()) {
+    if (!includeTest && isHarnessSession(s.candidateEmail)) continue;
+    const sc = s.scorecard;
+    const row = {
+      id: s.id,
+      candidateName: s.candidateName,
+      candidateEmail: s.candidateEmail,
+      language: s.language || "en",
+      status: s.status,
+      durationSeconds: s.durationSeconds,
+      verdict: sc?.verdict,
+      overallScore: sc?.overallScore,
+      summary: sc?.summary,
+      // The one line a recruiter reads if they read nothing else.
+      recommendationReason: sc?.recommendationReason,
+      topStrength: sc?.keyStrengths?.[0]?.title,
+      topConcern: sc?.redFlags?.[0]?.title,
+      // Requirement-by-requirement, which is what "does he actually have a
+      // bike and can he travel" looks like in the data.
+      requirements: (sc?.gapMatrix || []).map((g) => ({
+        requirement: g.requirement,
+        status: g.status,
+      })),
+      evidenced: (sc?.gapMatrix || []).filter((g) => g.status === "evidenced").length,
+      contradicted: (sc?.gapMatrix || []).filter((g) => g.status === "contradicted").length,
+      requirementCount: (sc?.gapMatrix || []).length,
+      screenQuality: sc?.screenQuality,
+      rescreenRecommended: sc?.rescreenRecommended,
+      graded: Boolean(sc),
+    };
+    const list = byRole.get(s.role) || [];
+    list.push(row);
+    byRole.set(s.role, list);
+  }
+
+  const roles = [...byRole.entries()]
+    .map(([role, candidates]) => {
+      candidates.sort((a, b) => {
+        // Ungraded candidates sink to the bottom regardless of anything else.
+        if (a.graded !== b.graded) return a.graded ? -1 : 1;
+        const ra = VERDICT_RANK[a.verdict] ?? 9;
+        const rb = VERDICT_RANK[b.verdict] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return (b.overallScore || 0) - (a.overallScore || 0);
+      });
+      return {
+        role,
+        total: candidates.length,
+        graded: candidates.filter((c) => c.graded).length,
+        advancing: candidates.filter(
+          (c) => c.verdict === "Advance" || c.verdict === "Advance with focus"
+        ).length,
+        candidates,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return res.json({ roles });
 });
 
 // Full detail for one session — the admin view of everything the candidate

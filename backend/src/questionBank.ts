@@ -52,7 +52,16 @@ function loadRoleContext(discipline: string): string | null {
 
 export type InterviewDuration = 1 | 5 | 15 | 30 | 45;
 
-/** Fixed axes keep candidates comparable; generated axes keep the role honest. */
+/**
+ * Fixed axes keep candidates comparable; generated axes keep the role honest.
+ *
+ * Two variants, because this system screens engineers AND non-engineers. Asking
+ * a peer-support listener or a field sales candidate about "Stack Fit" and
+ * "Technical Knowledge" produces nonsense axes and makes the whole scorecard
+ * look like it was built for somebody else's job. The shape is identical so
+ * candidates stay comparable within a role, which is the only comparison that
+ * matters.
+ */
 export const FIXED_RUBRIC_AXES = [
   "Project Depth",
   "Technical Knowledge",
@@ -60,6 +69,22 @@ export const FIXED_RUBRIC_AXES = [
   "Stack Fit",
   "Communication",
 ] as const;
+
+const NON_TECHNICAL_RUBRIC_AXES = [
+  "Depth of Experience",
+  "Role Knowledge",
+  "Problem-Solving Mindset",
+  "Role Fit",
+  "Communication",
+] as const;
+
+const TECHNICAL_DISCIPLINES = new Set(["backend", "frontend", "mobile", "devops", "data"]);
+
+function fixedAxesFor(discipline: string): readonly string[] {
+  return TECHNICAL_DISCIPLINES.has(discipline)
+    ? FIXED_RUBRIC_AXES
+    : NON_TECHNICAL_RUBRIC_AXES;
+}
 
 export interface RubricAxis {
   name: string;
@@ -167,8 +192,18 @@ function inferDiscipline(jdText: string): string {
     backend: score(["backend", "back-end", "api", "django", "server", "microservice", "database", "distributed", "scalab"]),
   };
 
-  const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
-  return best && best[1] > 0 ? best[0] : "any";
+  // Require more than a single incidental keyword. One mention of "Android
+  // phone" in a peer-support listener JD used to classify the whole role as
+  // mobile engineering, which then loaded the wrong role context and asked a
+  // counsellor about Kotlin.
+  const MIN_CONFIDENCE = 2;
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [bestName, bestScore] = ranked[0] || ["any", 0];
+  const runnerUp = ranked[1]?.[1] ?? 0;
+  // Also refuse to guess when two disciplines tie — that means the JD is not
+  // clearly either, and "any" produces better questions than a coin flip.
+  if (bestScore < MIN_CONFIDENCE || bestScore === runnerUp) return "any";
+  return bestName;
 }
 
 function buildSystemPrompt(
@@ -275,7 +310,7 @@ DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe qu
 
 RUBRIC
 Always include these five fixed axes, so candidates stay comparable across roles:
-${FIXED_RUBRIC_AXES.map((a) => `  - ${a}`).join("\n")}
+${fixedAxesFor(discipline).map((a) => `  - ${a}`).join("\n")}
 Then add 1-2 axes generated from THIS job description specifically (for example a leadership role might need "Technical Mentorship"; an internship might need "Learning Velocity"). Mark generated axes with "generated": true.
 
 CALIBRATE THE BAR TO THE JD. A 4/5 for an intern and a 4/5 for a staff engineer are completely different standards. Write strongSignal and weakSignal for the seniority this JD is actually hiring at. Read the JD carefully: a leadership role may barely mention coding, and testing it on algorithms would be a failure of the interview, not of the candidate.
@@ -556,9 +591,9 @@ LANGUAGE. ${
 - You have ${bank.durationMinutes} minutes total. Watch your pacing. Spending several minutes on the intro and rushing the technical questions is the most common way this interview fails.
 - Ask ONE question at a time, then stop and listen. Never stack multiple questions into one turn.
 - Do not read the scenario setup verbatim if it is long — compress it to the essentials and let the candidate ask for detail.
-- Adapt. If an answer is strong, use the escalation and go deeper. If they are floundering, use the fallback or move on — grinding someone down produces no signal and is unpleasant.
+- Adapt. If an answer is strong, use the escalation and go deeper. If they are struggling, use the fallback or move on — pressing past the point of signal wastes time and makes the conversation unpleasant.
 - Probe vague answers once: "can you be more specific about how you did that?" Accept the second answer and move on.
-- Stay conversational. This is a discussion between engineers, not an interrogation. Brief acknowledgements are fine; long monologues are not.
+- Stay conversational. This is a friendly professional discussion, not a test. Brief acknowledgements are fine; long monologues are not.
 - Stay inside the candidate's field. The questions above are already scoped to their role; ask those, and if you improvise a follow-up keep it in their domain. Never drift into engineering, infrastructure or distributed-systems topics unless this is genuinely an engineering role — and if this is not a technical role at all, keep every follow-up practical and grounded in the day-to-day work.
 - NEVER state what you are assessing, what a good answer contains, or what you were hoping they would say — not before, during, or after a question. If they ask how they did, say the team will follow up.
 - If the candidate asks about internal systems, company specifics, or anything you were not given, say you cannot go into detail and return to the question. You genuinely do not have that information.
