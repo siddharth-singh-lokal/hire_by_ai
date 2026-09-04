@@ -43,14 +43,15 @@ type Duration = 1 | 5 | 15 | 30 | 45;
 
 const DURATION_COPY: Record<Duration, string> = {
   1: "Smoke test — one quick question. For checking the flow end to end.",
-  5: "Demo length. One claim to verify, one problem to reason about.",
-  15: "1 project probe + 1 scenario + 1 gap probe. High-volume screening.",
-  30: "2 project probes + 2 scenarios + a gap probe. Recommended.",
-  45: "Adds a design and trade-off segment. Senior and lead roles.",
+  5: "Demo length. One resume probe + one technical question.",
+  15: "2 resume probes + 1 technical + 1 gap. High-volume screening.",
+  30: "2 resume probes + 2 technical + 1 gap. Recommended.",
+  45: "3 resume probes + 2 technical + 2 gaps. Senior and lead roles.",
 };
 
 const KIND_STYLE: Record<string, { label: string; className: string }> = {
   resume_probe: { label: "Resume probe", className: "bg-sky-500/10 text-sky-300 border-sky-500/30" },
+  technical: { label: "Technical", className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" },
   scenario: { label: "Org scenario", className: "bg-violet-500/10 text-violet-300 border-violet-500/30" },
   jd_gap: { label: "JD gap", className: "bg-amber-500/10 text-amber-300 border-amber-500/30" },
 };

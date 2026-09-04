@@ -1,7 +1,7 @@
 import { EVALUATION_MODEL_ID, AWS_REGION } from "./bedrock";
 import { callJson } from "./llm";
 import { QuestionBank } from "./questionBank";
-import { GroundedScorecard, EvidenceMoment } from "./scorecardTypes";
+import { GroundedScorecard, EvidenceMoment, QuestionAnswerReview } from "./scorecardTypes";
 import { StoredTranscript } from "./sessionStore";
 
 interface EvaluateInput {
@@ -88,9 +88,29 @@ WHAT WAS ASKED, AND ROUGHLY WHAT A GOOD ANSWER LOOKED LIKE. These are illustrati
 ${bank.questions
   .map(
     (q, i) =>
-      `${i + 1}. [${q.kind}] ${q.question}\n   intent: ${q.intent}\n   strong: ${q.strongAnswer.join("; ")}\n   weak: ${q.weakAnswer.join("; ")}`
+      `${i + 1}. [${q.kind}] id=${q.id} ${q.question}\n   intent: ${q.intent}\n   strong: ${q.strongAnswer.join("; ")}\n   weak: ${q.weakAnswer.join("; ")}`
   )
   .join("\n")}
+
+QUESTION-BY-QUESTION ANSWER VALIDATION — REQUIRED
+For EVERY question listed above, review the transcript and judge whether the candidate's answer was substantively CORRECT. This is not keyword matching — judge the reasoning and facts, not whether they recited the model answer.
+
+Accuracy labels (use exactly one per question):
+- **correct** — sound reasoning, key points right for a ${bank.seniority} screen; a different valid route still counts as correct
+- **mostly_correct** — right direction with minor gaps or one imprecision that does not undermine the core point
+- **partial** — some valid content but important gaps, too vague where specifics matter, or could not go deeper when pressed
+- **incorrect** — wrong facts, broken reasoning, buzzword salad with no substance, or (for resume_probe) clearly cannot explain work they claimed to have done
+- **not_established** — question never reached, or no meaningful candidate answer in the transcript
+
+Rules:
+- Do NOT mark **incorrect** for missing jargon, approximate numbers, or a different but defensible approach.
+- DO mark **incorrect** when they state something factually wrong, contradict a resume claim under probing, or recite terms without understanding when follow-up exposes it.
+- **resume_probe incorrect/partial** is high-weight — it signals resume mismatch; reflect this in axis scores, redFlags, and verdict.
+- **technical incorrect** means their proposed approach or reasoning would not work, not that they forgot a library name.
+- Include the best **verbatim candidateQuote** per question (empty string if not_established).
+- List **whatTheyGotRight** and **gapsOrErrors** as short bullet strings — be specific, cite what they said vs what was wrong or missing.
+
+Your axis scores and verdict MUST be consistent with these reviews. Multiple **incorrect** resume probes with no compensating strong answers should not produce "Advance" without serious justification.
 
 JD REQUIREMENTS WITH NO RESUME EVIDENCE (the interview was meant to probe these):
 ${bank.unevidencedRequirements.map((r) => `- ${r}`).join("\n") || "(none)"}
@@ -151,6 +171,16 @@ Return ONLY a JSON object. No comments, no trailing commas, no prose around it:
   "directQuotes": [{ "competency", "quote", "analysis", "impact": "positive"|"negative"|"neutral" }],
   "evidenceMoments": [{ "timeInSeconds", "speaker": "candidate"|"interviewer", "quote", "significance", "impact" }],
   "gapMatrix": [{ "requirement", "status": "evidenced"|"partial"|"unevidenced"|"contradicted", "finding" }],
+  "questionReviews": [{
+    "questionId": "must match bank id e.g. q1",
+    "kind": "resume_probe|technical|jd_gap|scenario",
+    "question": "the question text",
+    "accuracy": "correct"|"mostly_correct"|"partial"|"incorrect"|"not_established",
+    "summary": "one sentence for the recruiter",
+    "whatTheyGotRight": ["..."],
+    "gapsOrErrors": ["..."],
+    "candidateQuote": "verbatim from candidate or empty"
+  }],
   "r1Briefing": {
     "skip": [{ "topic", "reason" }],
     "probe": [{ "topic", "reason", "suggestedQuestion" }],
@@ -246,7 +276,58 @@ function applyEnglishQuotes(
       : f.evidenceQuote,
   }));
 
-  return { ...parsed, evidenceMoments, axisScores, keyStrengths, redFlags };
+  const ACCURACY = new Set([
+    "correct",
+    "mostly_correct",
+    "partial",
+    "incorrect",
+    "not_established",
+  ]);
+  const questionReviews: QuestionAnswerReview[] = (parsed.questionReviews || []).map(
+    (r: any) => ({
+      questionId: String(r.questionId || ""),
+      kind: String(r.kind || ""),
+      question: String(r.question || ""),
+      accuracy: ACCURACY.has(r.accuracy) ? r.accuracy : "not_established",
+      summary: String(r.summary || ""),
+      whatTheyGotRight: Array.isArray(r.whatTheyGotRight)
+        ? r.whatTheyGotRight.map(String)
+        : [],
+      gapsOrErrors: Array.isArray(r.gapsOrErrors) ? r.gapsOrErrors.map(String) : [],
+      candidateQuote: r.candidateQuote
+        ? englishQuote(String(r.candidateQuote), transcripts, { speaker: "candidate" })
+        : undefined,
+    })
+  );
+
+  return { ...parsed, evidenceMoments, axisScores, keyStrengths, redFlags, questionReviews };
+}
+
+/** Ensures every bank question has a review row even if the model omitted some. */
+function normalizeQuestionReviews(
+  bank: QuestionBank,
+  reviews: QuestionAnswerReview[]
+): QuestionAnswerReview[] {
+  const byId = new Map(reviews.map((r) => [r.questionId, r]));
+  return bank.questions.map((q) => {
+    const existing = byId.get(q.id);
+    if (existing) {
+      return {
+        ...existing,
+        question: existing.question || q.question,
+        kind: existing.kind || q.kind,
+      };
+    }
+    return {
+      questionId: q.id,
+      kind: q.kind,
+      question: q.question,
+      accuracy: "not_established" as const,
+      summary: "Not reached or not assessed in this interview.",
+      whatTheyGotRight: [],
+      gapsOrErrors: [],
+    };
+  });
 }
 
 export async function evaluateInterview(input: EvaluateInput): Promise<GroundedScorecard> {
@@ -319,6 +400,10 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
   }
 
   const localized = applyEnglishQuotes(parsed, input.transcripts);
+  const questionReviews = normalizeQuestionReviews(
+    input.bank,
+    localized.questionReviews || []
+  );
 
   return {
     ...localized,
@@ -335,6 +420,7 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
     axisScores: localized.axisScores || [],
     evidenceMoments: localized.evidenceMoments || [],
     gapMatrix: parsed.gapMatrix || [],
+    questionReviews,
     r1Briefing: parsed.r1Briefing || { skip: [], probe: [], suggestedOpener: "" },
     orgGrounded: input.orgGrounded,
     durationSeconds: input.durationSeconds,

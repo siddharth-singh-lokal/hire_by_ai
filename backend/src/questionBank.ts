@@ -98,8 +98,8 @@ export interface RubricAxis {
 
 export interface BankQuestion {
   id: string;
-  /** resume_probe verifies a claim; scenario tests reasoning; jd_gap covers a stated requirement. */
-  kind: "resume_probe" | "scenario" | "jd_gap";
+  /** resume_probe verifies a claim; technical tests JD skills; jd_gap covers a stated requirement; scenario is legacy org-context. */
+  kind: "resume_probe" | "technical" | "scenario" | "jd_gap";
   question: string;
   /** What this question is actually trying to find out. */
   intent: string;
@@ -141,18 +141,18 @@ export interface QuestionBank {
 }
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
-// Org "scenario" questions were removed by product decision — interviews now use
-// only resume_probe (verify what they actually did) and jd_gap (probe stated
-// requirements the resume doesn't evidence). The former scenario slots were
-// redistributed into these two so interviews stay just as substantive.
-const DURATION_PLAN: Record<InterviewDuration, { projects: number; scenarios: number; gaps: number }> = {
-  // 1 is a smoke-test length for checking the flow end to end: a single probe.
-  1: { projects: 1, scenarios: 0, gaps: 0 },
-  // 5 is a demo/taster length: one claim to verify plus one gap probe.
-  5: { projects: 1, scenarios: 0, gaps: 1 },
-  15: { projects: 2, scenarios: 0, gaps: 1 },
-  30: { projects: 3, scenarios: 0, gaps: 2 },
-  45: { projects: 4, scenarios: 0, gaps: 2 },
+// Org "scenario" questions were removed by product decision. Interviews use
+// resume_probe (verify claims), technical (JD-grounded skill/reasoning — NOT
+// resume walk-throughs), and jd_gap (stated requirements the resume doesn't show).
+const DURATION_PLAN: Record<
+  InterviewDuration,
+  { projects: number; technical: number; scenarios: number; gaps: number }
+> = {
+  1: { projects: 1, technical: 0, scenarios: 0, gaps: 0 },
+  5: { projects: 1, technical: 1, scenarios: 0, gaps: 0 },
+  15: { projects: 2, technical: 1, scenarios: 0, gaps: 1 },
+  30: { projects: 2, technical: 2, scenarios: 0, gaps: 1 },
+  45: { projects: 3, technical: 2, scenarios: 0, gaps: 2 },
 };
 
 export function loadContextPack(): ContextPack | null {
@@ -214,7 +214,7 @@ function inferDiscipline(jdText: string): string {
 
 function buildSystemPrompt(
   pack: ContextPack | null,
-  plan: { projects: number; scenarios: number; gaps: number },
+  plan: { projects: number; technical: number; scenarios: number; gaps: number },
   duration: InterviewDuration,
   discipline: string
 ): string {
@@ -318,7 +318,7 @@ That is the whole bar. You are NOT deciding whether to hire them, and you are NO
 
 CALIBRATE ACCORDINGLY
 - Questions should be answerable by someone who genuinely did the work on their resume, and hard to answer convincingly by someone who did not. That contrast is the entire signal.
-- Ask about what they claim, not about everything the role could conceivably touch.
+- Mix resume verification with standalone technical questions from the JD — a screening that is ONLY "walk me through your projects" misses whether they can think about the role's core skills.
 - Do NOT design questions whose purpose is to find the edge of someone's knowledge. Finding the edge is the next round's job.
 - A missing skill is not a failure. People learn on the job. Only test what the role genuinely requires from day one.
 - Keep the tone warm and collegial. This is a conversation between engineers, not an examination.
@@ -327,12 +327,16 @@ STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
 Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
 ${packSection}${roleSection}
 
-DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s)${plan.scenarios ? ` and ${plan.scenarios} scenario question(s)` : ""} and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
+DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.technical} technical question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
 ${
     plan.scenarios === 0
-      ? `DO NOT create any "scenario" questions. No hypotheticals, no "imagine you're supporting a system where…" set-ups. Every question must be either a resume_probe (about something on their resume) or a jd_gap (a stated JD requirement the resume does not evidence). Use "resume_probe" and "jd_gap" as the only values for "kind".`
+      ? `DO NOT create any "scenario" questions tied to org-internal incidents. No "imagine you're supporting our production system where…" set-ups. Use "resume_probe", "technical", and "jd_gap" as the only values for "kind".`
       : ""
   }
+
+INTERVIEW SHAPE — alternate resume and technical
+- Do NOT make every question a resume walk-through. At least ${plan.technical} question(s) must be standalone technical — drawn from JD skills and responsibilities, not from a line on the résumé.
+- Interleave types where possible: resume → technical → resume → gap, so the conversation feels like a real screen, not a CV audit.
 
 RUBRIC
 Always include these five fixed axes, so candidates stay comparable across roles:
@@ -347,6 +351,7 @@ CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort
 
 QUESTION DESIGN
 - resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot. Use several of these, each on a DIFFERENT project/claim, so the interview covers the breadth of what they've done rather than drilling one thing to death.
+- technical: test a core skill the JD requires — reasoning, tradeoffs, debugging approach, or how they'd solve a realistic problem in this role's domain. Draw from JD responsibilities and required tools/skills, NOT from the resume. Examples: "How would you approach…", "What tradeoff would you weigh between…", "Walk me through how you'd debug…". Screening depth only — one concept, answerable in a few minutes. No trivia, no trick questions, no org-internal systems they cannot know.
 ${plan.scenarios ? "- scenario: reasoning under realistic constraints, drawn from the org context.\n" : ""}- jd_gap: cover a stated requirement the resume gives no evidence for — asked as a direct question about their experience with it, NOT as a hypothetical scenario.
 - Every question needs escalations (asked when the answer is strong) and ideally a fallback (a simpler angle if they are struggling).
 - strongAnswer/weakAnswer must be specific enough to grade against later. "Good understanding" is useless; "identifies that the pool must close idle connections before the server does" is gradable.
@@ -395,7 +400,7 @@ function toList(value: unknown): string[] {
 function normaliseQuestion(q: any, index: number): BankQuestion {
   return {
     id: q?.id || `q${index + 1}`,
-    kind: ["resume_probe", "scenario", "jd_gap"].includes(q?.kind) ? q.kind : "scenario",
+    kind: ["resume_probe", "technical", "scenario", "jd_gap"].includes(q?.kind) ? q.kind : "resume_probe",
     question: String(q?.question || "").trim(),
     intent: String(q?.intent || "").trim(),
     axes: toList(q?.axes),
@@ -590,10 +595,17 @@ export function renderInterviewerPrompt(
   // over the answer key. The grader reads those fields straight off the bank
   // afterwards, so nothing is lost by withholding them here. Same principle as
   // the Slack connection: it cannot leak what it was never given.
+  const kindTag: Record<string, string> = {
+    resume_probe: "Resume — verify a claim",
+    technical: "Technical — from the JD (not their CV)",
+    jd_gap: "JD gap — skill not evidenced on resume",
+    scenario: "Scenario",
+  };
+
   const questionBlock = bank.questions
     .map(
       (q, i) => `
-${i + 1}. [~${q.minutes} min] ${q.question}${
+${i + 1}. [${kindTag[q.kind] || q.kind}] (~${q.minutes} min) ${q.question}${
         q.escalations.length
           ? `\n   If they answer this well, follow up with: ${q.escalations.join(" / ")}`
           : ""
@@ -621,10 +633,12 @@ The candidate's name is ${candidateName}. ${
 
 ${openingSection}
 
-YOUR QUESTIONS — work through these in order. Ask them as written, in your own voice. Everything in this list is for you alone; never read the bracketed timings or the follow-up notes aloud, and never tell the candidate what you are hoping to hear.
+YOUR QUESTIONS — work through these in order. Ask them as written, in your own voice. Everything in this list is for you alone; never read the bracketed timings, type labels, or the follow-up notes aloud, and never tell the candidate what you are hoping to hear.
 ${questionBlock}
 
 HOW TO CONDUCT THIS
+
+MIX RESUME AND TECHNICAL — CRITICAL. Your list includes resume verification questions AND standalone technical questions (tagged "Technical — from the JD"). Do NOT turn the whole interview into "tell me about every project on your CV". When you reach a technical question, ask it even if you have not exhausted their resume — it tests how they think about the role's core skills, not what they list on paper. If the list is short on technical tags, still ask at least one JD-grounded technical question (tradeoff, debugging approach, or how they'd solve a realistic problem in this role) before you wrap.
 
 KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or three sentences, then stop talking. You are on a voice call — a thirty-second monologue is unbearable to sit through and burns interview time the candidate needs for answering. Ask the question and stop. Do not preamble, do not restate the question a second way, do not explain why you are asking.
 
@@ -660,4 +674,49 @@ LANGUAGE. ${
 - Close by thanking them and telling them the team will follow up.
 
 IMPORTANT: You are gathering evidence for a human hiring manager. You are not making a hire decision, and you must never tell the candidate how they did.`;
+}
+
+/** Significant words from a question stem for fuzzy matching against spoken lines. */
+function questionKeywords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 4 && !/^(walk|tell|describe|explain|share|talk|give|what|your|have|been|would|could|about|through|with|from|that|this|they|them|were|when|where|which)$/.test(w))
+    .slice(0, 6);
+}
+
+/**
+ * Best-effort index of the furthest bank question the interviewer has asked,
+ * inferred by matching spoken lines against question stems.
+ */
+export function estimateFurthestQuestionIndex(
+  bank: QuestionBank,
+  transcripts: { sender: string; text: string }[]
+): number {
+  let highest = -1;
+  const lines = transcripts
+    .filter((t) => t.sender === "interviewer")
+    .map((t) => t.text.toLowerCase());
+
+  for (let i = 0; i < bank.questions.length; i++) {
+    const keys = questionKeywords(bank.questions[i].question);
+    if (!keys.length) continue;
+    for (const line of lines) {
+      const hits = keys.filter((k) => line.includes(k)).length;
+      if (hits >= Math.min(2, keys.length)) highest = Math.max(highest, i);
+    }
+  }
+  return highest;
+}
+
+/** True if a spoken line is the opening greeting rather than a real question. */
+export function isOpeningLine(text: string, openingLine: string, candidateName: string): boolean {
+  const spoken = text.trim().toLowerCase();
+  const opening = personaliseOpening(openingLine, candidateName).trim().toLowerCase();
+  if (!spoken || !opening) return false;
+  if (spoken === opening) return true;
+  // Opening is usually short and has no question mark.
+  if (spoken.length < opening.length + 40 && opening.slice(0, 40) === spoken.slice(0, 40)) return true;
+  return false;
 }

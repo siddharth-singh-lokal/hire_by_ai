@@ -81,6 +81,8 @@ export interface InterviewSession {
   scorecard?: GroundedScorecard;
   /** Last substantive question asked — anchors resume after drops or long silence. */
   lastQuestionAsked?: string;
+  /** Highest bank question index the interviewer has reached (0-based). */
+  furthestQuestionIndex?: number;
   /** Set if grading itself failed, so the admin sees why rather than nothing. */
   gradingError?: string;
   /** Why the interview ended early, when it did. */
@@ -212,11 +214,9 @@ function restore(): void {
     const rows: InterviewSession[] = JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
     let migrated = false;
     for (const row of rows) {
-      // An interview that was mid-flight when the server died cannot resume,
-      // so it is recorded as interrupted rather than left looking active.
-      if (row.status === "in_progress" || row.status === "grading") {
-        row.status = "terminated";
-        row.terminationReason = row.terminationReason || "server restarted mid-interview";
+      // Grading mid-restart leaves a session stuck; in_progress can resume.
+      if (row.status === "grading") {
+        row.status = "in_progress";
       }
       // Older stores kept the evidence blobs inline. Move them out on first load.
       if (row.redFlags?.some((f) => f.snapshot || f.clip)) {
@@ -381,4 +381,14 @@ export function recordStreamDrop(id: string): number {
 export function listSessions(): InterviewSession[] {
   evictExpired();
   return [...sessions.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** True when a new WebSocket should bootstrap with a resume note, not a fresh open. */
+export function shouldResumeInterview(session: InterviewSession): boolean {
+  if (session.status !== "in_progress") return false;
+  return (
+    session.transcripts.length > 0 ||
+    !!session.lastQuestionAsked ||
+    (session.furthestQuestionIndex ?? -1) >= 0
+  );
 }

@@ -31,6 +31,44 @@ const GAP_STYLE: Record<string, { icon: React.ReactNode; className: string }> = 
   contradicted: { icon: <XCircle className="w-3.5 h-3.5" />, className: "text-rose-400" },
 };
 
+const ACCURACY_STYLE: Record<
+  string,
+  { label: string; className: string; border: string }
+> = {
+  correct: {
+    label: "Correct",
+    className: "text-emerald-300 bg-emerald-500/10",
+    border: "border-emerald-500/25",
+  },
+  mostly_correct: {
+    label: "Mostly correct",
+    className: "text-teal-300 bg-teal-500/10",
+    border: "border-teal-500/25",
+  },
+  partial: {
+    label: "Partial",
+    className: "text-amber-300 bg-amber-500/10",
+    border: "border-amber-500/25",
+  },
+  incorrect: {
+    label: "Incorrect",
+    className: "text-rose-300 bg-rose-500/10",
+    border: "border-rose-500/25",
+  },
+  not_established: {
+    label: "Not assessed",
+    className: "text-slate-400 bg-slate-800/50",
+    border: "border-slate-700",
+  },
+};
+
+const KIND_LABEL: Record<string, string> = {
+  resume_probe: "Resume",
+  technical: "Technical",
+  jd_gap: "JD gap",
+  scenario: "Scenario",
+};
+
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -60,7 +98,7 @@ function Scorecard() {
   const [transcripts, setTranscripts] = useState<any[]>([]);
   const [flags, setFlags] = useState<RedFlag[]>([]);
   const [hasRecording, setHasRecording] = useState(false);
-  const [tab, setTab] = useState<"evidence" | "gaps" | "transcript">("evidence");
+  const [tab, setTab] = useState<"answers" | "evidence" | "gaps" | "transcript">("answers");
 
   const run = useCallback(async () => {
     if (!sessionId) {
@@ -284,6 +322,7 @@ function Scorecard() {
             <div className="flex border-b border-slate-800">
               {(
                 [
+                  ["answers", "Answer check"],
                   ["evidence", "Evidence"],
                   ["gaps", "JD coverage"],
                   ["transcript", "Transcript"],
@@ -304,6 +343,77 @@ function Scorecard() {
             </div>
 
             <div className="p-5">
+              {tab === "answers" && (
+                <div className="space-y-4">
+                  {(evaluation.questionReviews || []).length === 0 && (
+                    <p className="text-xs text-slate-500">
+                      No per-question validation yet — click Regrade on a completed interview to
+                      generate it.
+                    </p>
+                  )}
+                  {(evaluation.questionReviews || []).map((r: any, i: number) => {
+                    const style = ACCURACY_STYLE[r.accuracy] || ACCURACY_STYLE.not_established;
+                    return (
+                      <div
+                        key={r.questionId || i}
+                        className={`p-4 rounded-xl border ${style.border} bg-slate-950/40`}
+                      >
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                          <span
+                            className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full ${style.className}`}
+                          >
+                            {style.label}
+                          </span>
+                          <span className="text-[10px] text-slate-600 uppercase tracking-wide">
+                            {KIND_LABEL[r.kind] || r.kind}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed font-medium">
+                          {r.question}
+                        </p>
+                        {r.summary && (
+                          <p className="mt-2 text-[11px] text-slate-400 leading-relaxed">
+                            {r.summary}
+                          </p>
+                        )}
+                        {r.candidateQuote && (
+                          <p className="mt-2 text-xs text-slate-200 italic leading-relaxed flex gap-2">
+                            <Quote className="w-3 h-3 shrink-0 mt-0.5 text-slate-600" />
+                            <span>{r.candidateQuote}</span>
+                          </p>
+                        )}
+                        {r.whatTheyGotRight?.length > 0 && (
+                          <ul className="mt-3 space-y-1">
+                            {r.whatTheyGotRight.map((line: string, j: number) => (
+                              <li
+                                key={j}
+                                className="text-[11px] text-emerald-400/90 flex gap-2 leading-relaxed"
+                              >
+                                <CheckCircle2 className="w-3 h-3 shrink-0 mt-0.5" />
+                                {line}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {r.gapsOrErrors?.length > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {r.gapsOrErrors.map((line: string, j: number) => (
+                              <li
+                                key={j}
+                                className="text-[11px] text-rose-400/90 flex gap-2 leading-relaxed"
+                              >
+                                <XCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                                {line}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               {tab === "evidence" && (
                 <div className="space-y-3">
                   {(evaluation.evidenceMoments || []).length === 0 && (

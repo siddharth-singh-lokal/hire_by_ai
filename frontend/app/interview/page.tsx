@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -102,6 +102,19 @@ function InterviewRoom() {
     session?.status === "completed" || session?.status === "grading";
   const wasInterrupted = session?.status === "terminated";
 
+  const savedTranscripts = useMemo(
+    () =>
+      session?.transcripts?.map((t, i) => ({
+        id: `saved-${t.timestamp}-${i}`,
+        sender: t.sender as "candidate" | "interviewer",
+        text: t.text,
+        textEn: t.textEn,
+        timestamp: t.timestamp,
+        isFinal: true,
+      })),
+    [session?.transcripts]
+  );
+
   const {
     connectionState,
     error,
@@ -122,7 +135,10 @@ function InterviewRoom() {
     endRequested,
     concluded,
     reconnecting,
-  } = useNovaSonicInterview(sessionId);
+  } = useNovaSonicInterview(sessionId, {
+    isResuming: isRejoin,
+    initialTranscripts: savedTranscripts,
+  });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
@@ -481,6 +497,11 @@ function InterviewRoom() {
 
           {session && !isAlreadyDone && (
             <div className="mt-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-left space-y-2">
+              {sessionId && (
+                <p className="text-[11px] text-slate-500 font-mono break-all">
+                  Session ID: {sessionId}
+                </p>
+              )}
               {[
                 "Your camera and microphone stay on throughout",
                 "The session is recorded for the hiring team",
@@ -528,6 +549,14 @@ function InterviewRoom() {
           <span className="text-xs font-medium text-slate-300 truncate hidden sm:inline">
             Interview in progress
           </span>
+          {sessionId && (
+            <span
+              className="text-[10px] text-slate-600 font-mono truncate hidden md:inline"
+              title={sessionId}
+            >
+              {sessionId.slice(-12)}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3 sm:gap-4 shrink-0">

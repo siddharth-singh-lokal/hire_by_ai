@@ -29,7 +29,7 @@ export interface RubricAxis {
 
 export interface BankQuestion {
   id: string;
-  kind: "resume_probe" | "scenario" | "jd_gap";
+  kind: "resume_probe" | "technical" | "scenario" | "jd_gap";
   question: string;
   intent: string;
   axes: string[];
@@ -85,6 +85,8 @@ export interface CandidateSessionDetail {
   startedAt: number | null;
   /** Server clock at response time, so the client can cancel skew. */
   serverNow: number;
+  transcriptCount?: number;
+  transcripts?: { sender: "candidate" | "interviewer"; text: string; textEn?: string; timestamp: number }[];
 }
 
 export async function fetchCandidateSession(sessionId: string): Promise<CandidateSessionDetail> {

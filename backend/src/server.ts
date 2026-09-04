@@ -281,6 +281,12 @@ app.get("/api/candidate/session/:id", (req: Request, res: Response) => {
     status: session.status,
     startedAt: session.startedAt ?? null,
     serverNow: Date.now(),
+    transcriptCount: session.transcripts.length,
+    /** Saved server-side so a refresh or rejoin can restore the conversation panel. */
+    transcripts:
+      session.status === "in_progress" || session.status === "ready"
+        ? session.transcripts
+        : [],
   });
 });
 

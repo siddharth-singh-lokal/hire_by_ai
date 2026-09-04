@@ -3,9 +3,9 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { sonicClient, SONIC_MODEL_ID } from "./bedrock";
-import { getSession, updateSession, appendTranscript, patchTranscriptEnglish, recordStreamDrop } from "./sessionStore";
+import { getSession, updateSession, appendTranscript, patchTranscriptEnglish, recordStreamDrop, shouldResumeInterview } from "./sessionStore";
 import { gradeSession } from "./grading";
-import { renderInterviewerPrompt } from "./questionBank";
+import { renderInterviewerPrompt, estimateFurthestQuestionIndex, isOpeningLine, personaliseOpening } from "./questionBank";
 import { resolveLanguage } from "./languages";
 import { shouldLocalizeTranscript, translateLineToHinglish } from "./translate";
 
@@ -242,7 +242,7 @@ const RECOVERABLE =
 const MAX_STREAM_ATTEMPTS = 5;
 
 /** How much recent conversation a resumed stream is shown. */
-const RESUME_TAIL_LINES = 18;
+const RESUME_TAIL_LINES = 24;
 
 /** Brief check-ins that are not real interview questions — skip when resuming. */
 function isPingTurn(text: string): boolean {
@@ -325,6 +325,8 @@ export function attachNovaSonicRelay(server: Server): void {
     let openingKickFired = false;
     let serverSilenceTimer: ReturnType<typeof setInterval> | null = null;
     let clientMicActive = false;
+    /** Set when the browser is reconnecting — do not grade on the ensuing ws close. */
+    let expectReconnect = false;
 
     const cancelOpeningKick = () => {
       if (openingKickTimer) {
@@ -549,14 +551,24 @@ export function attachNovaSonicRelay(server: Server): void {
           finish("client requested stop", { closeWs: false });
           break;
         }
+
+        // Browser is swapping WebSocket connections (auto-reconnect) — not ending.
+        case "detach": {
+          expectReconnect = true;
+          closeSonicStream(session);
+          teardown("client detached for reconnect");
+          break;
+        }
       }
     });
 
     // A closed tab, a crashed browser, a lost network: the transcript is already
-    // server-side, so the interview is graded regardless. This used to only
-    // tear the stream down, and grading silently depended on the browser
-    // posting /complete afterwards.
-    ws.on("close", () => finish("websocket closed", { closeWs: false }));
+    // server-side, so the interview is graded regardless — unless the client
+    // signalled a reconnect with detach.
+    ws.on("close", () => {
+      if (expectReconnect) return;
+      finish("websocket closed", { closeWs: false });
+    });
     ws.on("error", (err) => {
       console.error("[Sonic] WebSocket error:", err);
       finish("websocket error", { closeWs: false });
@@ -705,6 +717,9 @@ export function attachNovaSonicRelay(server: Server): void {
       const fresh = getSession(prepared.id) ?? prepared;
       const name = prepared.candidateName;
       const transcripts = fresh.transcripts;
+      const furthest =
+        fresh.furthestQuestionIndex ??
+        estimateFurthestQuestionIndex(fresh.bank, transcripts);
       const lastQ =
         fresh.lastQuestionAsked || lastSubstantiveInterviewerTurn(transcripts);
       const lastLine = transcripts[transcripts.length - 1];
@@ -713,18 +728,33 @@ export function attachNovaSonicRelay(server: Server): void {
         .slice(-RESUME_TAIL_LINES)
         .map((t) => `${t.sender === "candidate" ? name : "You"}: ${t.text}`)
         .join("\n");
+      const nextIndex = Math.min(furthest + 1, fresh.bank.questions.length - 1);
+      const nextQuestion = fresh.bank.questions[nextIndex];
+      const progress =
+        furthest >= 0
+          ? `PROGRESS: You have already asked questions 1 through ${furthest + 1} of ${fresh.bank.questions.length}. ` +
+            `Those are DONE — do NOT ask them again.\n` +
+            (nextQuestion && furthest < fresh.bank.questions.length - 1
+              ? `Your NEXT scripted question is #${nextIndex + 1}: "${nextQuestion.question}"\n\n`
+              : furthest >= fresh.bank.questions.length - 1
+              ? `You are near the end of your question list — wrap up remaining topics, do not restart.\n\n`
+              : "")
+          : "";
       return (
-        `The call dropped and has just been restored. You are MID-INTERVIEW.\n\n` +
+        `The call dropped and has just been restored. You are MID-INTERVIEW — this is NOT a new call.\n\n` +
         `FORBIDDEN: greeting ${name} again, saying "hey" or "hello", re-introducing yourself, ` +
-        `or asking any question that already appears answered in the transcript below.\n\n` +
+        `or asking question 1 or any question already answered in the transcript below.\n\n` +
+        progress +
         (lastQ
           ? `CONTINUE FROM YOUR LAST QUESTION (do NOT go back to earlier ones):\n"${lastQ}"\n\n` +
             (waitingForAnswer
               ? `${name} had not answered yet when we dropped — they may have been thinking. ` +
-                `Repeat that question briefly in one sentence, then listen.\n\n`
-              : `${name}'s last answer is in the transcript below — respond to it, ` +
-                `then ask the NEXT question from your list, not an earlier one.\n\n`)
-          : "") +
+                `Say ONE brief natural line acknowledging the reconnect (e.g. "Sorry about that — let's pick up"), ` +
+                `then repeat that question in one sentence and listen.\n\n`
+              : `${name}'s last answer is in the transcript below. ` +
+                `Say ONE brief natural line acknowledging the reconnect, respond to their answer, ` +
+                `then ask the NEXT question from your list — not an earlier one.\n\n`)
+          : `Say ONE brief natural line acknowledging the reconnect, then continue where you left off.\n\n`) +
         (tail
           ? `Recent conversation, verbatim:\n${tail}\n\n`
           : `You had only just opened; nothing substantive has been asked yet.\n\n`) +
@@ -732,7 +762,22 @@ export function attachNovaSonicRelay(server: Server): void {
       );
     };
 
+    const fireResumeKick = () => {
+      if (session.closed || !session.ready) return;
+      const fresh = getSession(prepared.id) ?? prepared;
+      if (!shouldResumeInterview(fresh)) return;
+      console.log(`[Sonic] ${prepared.id} — resume kick after reconnect`);
+      injectSilentAudio(session, 24);
+      injectSystemNote(
+        session,
+        `SYSTEM NOTE — the line just reconnected. Say ONE warm sentence acknowledging the glitch ("Sorry about that — let's pick up where we were"), ` +
+          `then continue EXACTLY from your last question or their last answer. Do NOT restart from question 1.`
+      );
+    };
+
     const startStream = async (resumeNote?: string): Promise<void> => {
+      recentlyEmitted.candidate = [];
+      recentlyEmitted.interviewer = [];
       bootstrap(resumeNote);
 
       try {
@@ -744,11 +789,16 @@ export function attachNovaSonicRelay(server: Server): void {
           { abortSignal: session.abort.signal }
         );
 
-        send({ type: "ready" });
+        send({ type: "ready", sessionId: prepared.id, resuming: !!resumeNote });
+
+        const freshForClient = getSession(prepared.id) ?? prepared;
+        if (resumeNote || shouldResumeInterview(freshForClient)) {
+          send({ type: "transcript_history", transcripts: freshForClient.transcripts });
+        }
 
         // Fresh interview: keep silence flowing server-side until the mic is up,
         // then nudge the interviewer to open if the candidate stays quiet.
-        if (!resumeNote && !prepared.transcripts.some((t) => t.sender === "interviewer")) {
+        if (!resumeNote && !shouldResumeInterview(freshForClient)) {
           startServerSilence();
           cancelOpeningKick();
           candidateSpokeThisStream = false;
@@ -757,6 +807,12 @@ export function attachNovaSonicRelay(server: Server): void {
             if (session.closed || !session.ready || ws.readyState !== WebSocket.OPEN) return;
             fireOpeningKick();
           }, 2000);
+        } else if (resumeNote) {
+          // Nudge the model to speak after a Bedrock stream reconnect.
+          setTimeout(() => {
+            if (session.closed || !session.ready || ws.readyState !== WebSocket.OPEN) return;
+            fireResumeKick();
+          }, 1200);
         }
 
         // Replay whatever the candidate said while we were reconnecting.
@@ -818,8 +874,19 @@ export function attachNovaSonicRelay(server: Server): void {
 
               if (sender === "interviewer") {
                 stopServerSilence();
-                if (!isPingTurn(text)) {
+                const opening = personaliseOpening(prepared.bank.openingLine, prepared.candidateName);
+                if (!isPingTurn(text) && !isOpeningLine(text, opening, prepared.candidateName)) {
                   updateSession(prepared.id, { lastQuestionAsked: text });
+                  const idx = estimateFurthestQuestionIndex(
+                    prepared.bank,
+                    (getSession(prepared.id) ?? prepared).transcripts
+                  );
+                  if (idx >= 0) {
+                    const current = getSession(prepared.id);
+                    if ((current?.furthestQuestionIndex ?? -1) < idx) {
+                      updateSession(prepared.id, { furthestQuestionIndex: idx });
+                    }
+                  }
                 }
                 cancelOpeningKick();
               }
@@ -926,7 +993,9 @@ export function attachNovaSonicRelay(server: Server): void {
             ? "Session credentials have expired. Please contact the recruiter."
             : err?.message || "The interview stream failed unexpectedly.",
         });
-        finish("stream failed");
+        // Leave the session in_progress so the candidate can rejoin — do not grade.
+        teardown(`stream failed: ${label}`);
+        if (ws.readyState === WebSocket.OPEN) ws.close();
       }
     };
 
@@ -955,10 +1024,9 @@ export function attachNovaSonicRelay(server: Server): void {
       }, GRADE_DELAY_MS);
     };
 
-    // If this session already has candidate turns, the browser is reconnecting
-    // (its WebSocket dropped — e.g. a backend restart) rather than starting fresh,
-    // so resume from progress instead of greeting again.
-    const resuming = prepared.transcripts.some((t) => t.sender === "candidate");
+    // Resume if the session was already underway — page refresh, browser
+    // reconnect, or a prior drop that left transcripts server-side.
+    const resuming = shouldResumeInterview(prepared);
     startStream(resuming ? buildResumeNote() : undefined).catch((e) =>
       console.error("[Sonic] startStream:", e?.message)
     );

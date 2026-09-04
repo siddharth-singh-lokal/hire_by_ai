@@ -91,6 +91,26 @@ export interface GapMatrixRow {
   finding: string;
 }
 
+/** Per-question validation: was the candidate's answer substantively correct? */
+export type AnswerAccuracy =
+  | "correct"
+  | "mostly_correct"
+  | "partial"
+  | "incorrect"
+  | "not_established";
+
+export interface QuestionAnswerReview {
+  questionId: string;
+  kind: string;
+  question: string;
+  accuracy: AnswerAccuracy;
+  /** One-line recruiter summary. */
+  summary: string;
+  whatTheyGotRight: string[];
+  gapsOrErrors: string[];
+  candidateQuote?: string;
+}
+
 export interface GroundedScorecard extends ScorecardEvaluation {
   candidateName: string;
   role: string;
@@ -99,6 +119,8 @@ export interface GroundedScorecard extends ScorecardEvaluation {
   evidenceMoments: EvidenceMoment[];
   r1Briefing: R1Briefing;
   gapMatrix: GapMatrixRow[];
+  /** Question-by-question answer validation against the bank. */
+  questionReviews?: QuestionAnswerReview[];
   /** True when questions were grounded in the org Context Pack. */
   orgGrounded: boolean;
   /**

@@ -44,7 +44,7 @@ export interface UseNovaSonicInterviewReturn {
   isUserSpeaking: boolean;
   aiVolume: number;
   userVolume: number;
-  startInterview: (customApiKey?: string) => Promise<void>;
+  startInterview: (isReconnect?: boolean) => Promise<void>;
   endInterview: () => void;
   toggleMute: () => void;
   toggleVideo: () => void;
@@ -171,10 +171,23 @@ function backendWsUrl(sessionId?: string | null): string {
   return sessionId ? `${base}?sessionId=${encodeURIComponent(sessionId)}` : base;
 }
 
-export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicInterviewReturn {
+export function useNovaSonicInterview(
+  sessionId?: string | null,
+  options?: {
+    /** Session was already underway — skip opening kick and preserve transcript. */
+    isResuming?: boolean;
+    initialTranscripts?: TranscriptItem[];
+  }
+): UseNovaSonicInterviewReturn {
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
+  const [transcripts, setTranscripts] = useState<TranscriptItem[]>(
+    options?.initialTranscripts ?? []
+  );
+  const isResumingRef = useRef(!!options?.isResuming);
+  const skipOpeningKickRef = useRef(
+    !!options?.isResuming || (options?.initialTranscripts?.length ?? 0) > 0
+  );
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isVideoMuted, setIsVideoMuted] = useState(false);
@@ -205,7 +218,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const preMicSilenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const openingKickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const micStreamingRef = useRef(false);
-  const startInterviewRef = useRef<(() => Promise<void>) | null>(null);
+  const startInterviewRef = useRef<((isReconnect?: boolean) => Promise<void>) | null>(null);
 
   /** Decays the user's meter so it falls smoothly instead of snapping to zero. */
   const userVolumeRef = useRef(0);
@@ -228,7 +241,17 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     localBargeIns: 0,
   });
 
-  const cleanup = useCallback(() => {
+  useEffect(() => {
+    isResumingRef.current = !!options?.isResuming;
+    skipOpeningKickRef.current =
+      !!options?.isResuming || (options?.initialTranscripts?.length ?? 0) > 0;
+    if (options?.initialTranscripts?.length) {
+      setTranscripts(options.initialTranscripts);
+    }
+  }, [options?.isResuming, options?.initialTranscripts]);
+
+  const cleanup = useCallback((opts?: { sendStop?: boolean }) => {
+    const sendStop = opts?.sendStop !== false;
     closingRef.current = true;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -249,8 +272,13 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     }
     micStreamingRef.current = false;
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (sendStop && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "stop" }));
+      wsRef.current.close();
+    } else if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "detach" }));
+      wsRef.current.close();
+    } else if (wsRef.current) {
       wsRef.current.close();
     }
     wsRef.current = null;
@@ -298,7 +326,9 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       if (intentionalCloseRef.current || noReconnectRef.current) return;
-      startInterviewRef.current?.();
+      skipOpeningKickRef.current = true;
+      isResumingRef.current = true;
+      startInterviewRef.current?.(true);
     }, delay);
   }, []);
 
@@ -339,11 +369,16 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
     []
   );
 
-  const startInterview = useCallback(async () => {
-    // Tear down any previous attempt so this is safe to call for a reconnect.
-    cleanup();
+  const startInterview = useCallback(async (isReconnect = false) => {
+    // Tear down any previous attempt. Reconnects must NOT send stop — that ends
+    // the interview server-side and triggers grading.
+    cleanup({ sendStop: !isReconnect });
     setError(null);
     closingRef.current = false;
+    if (isReconnect) {
+      skipOpeningKickRef.current = true;
+      isResumingRef.current = true;
+    }
     intentionalCloseRef.current = false;
     noReconnectRef.current = false;
     setEndRequested(false);
@@ -398,6 +433,10 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             wsAttemptsRef.current = 0;
             setReconnecting(false);
             setConnectionState("active");
+            if (msg.resuming) {
+              skipOpeningKickRef.current = true;
+              isResumingRef.current = true;
+            }
             micStreamingRef.current = false;
             if (!preMicSilenceTimerRef.current) {
               preMicSilenceTimerRef.current = setInterval(() => {
@@ -415,14 +454,33 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
                 }
               }, 32);
             }
-            if (openingKickTimerRef.current) clearTimeout(openingKickTimerRef.current);
-            openingKickTimerRef.current = setTimeout(() => {
-              openingKickTimerRef.current = null;
-              if (intentionalCloseRef.current || closingRef.current) return;
-              if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: "kickoff" }));
-              }
-            }, 2000);
+            if (!skipOpeningKickRef.current) {
+              if (openingKickTimerRef.current) clearTimeout(openingKickTimerRef.current);
+              openingKickTimerRef.current = setTimeout(() => {
+                openingKickTimerRef.current = null;
+                if (intentionalCloseRef.current || closingRef.current) return;
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({ type: "kickoff" }));
+                }
+              }, 2000);
+            }
+            break;
+
+          case "transcript_history":
+            if (Array.isArray(msg.transcripts) && msg.transcripts.length) {
+              setTranscripts(
+                msg.transcripts.map((t: any, i: number) => ({
+                  id: `hist-${t.timestamp ?? i}-${i}`,
+                  sender: t.sender,
+                  text: t.text,
+                  textEn: t.textEn,
+                  timestamp: t.timestamp ?? Date.now(),
+                  isFinal: true,
+                }))
+              );
+              skipOpeningKickRef.current = true;
+              isResumingRef.current = true;
+            }
             break;
 
           case "audio": {
