@@ -37,9 +37,8 @@ export interface StoredTranscript {
   text: string;
   timestamp: number;
   /**
-   * English translation of `text`, populated after grading when the interview
-   * was conducted in a non-English language. `text` stays the verbatim original
-   * (for evidence quotes); the recruiter reads `textEn`.
+   * Roman Hinglish display form of `text` (Latin script). Populated after grading
+   * or live during the call. `text` stays the verbatim ASR original.
    */
   textEn?: string;
 }

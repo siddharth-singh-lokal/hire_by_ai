@@ -7,7 +7,7 @@ import { getSession, updateSession, appendTranscript, patchTranscriptEnglish, re
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
 import { resolveLanguage } from "./languages";
-import { shouldTranslateToEnglish, translateLineToEnglish } from "./translate";
+import { shouldLocalizeTranscript, translateLineToHinglish } from "./translate";
 
 /**
  * Nova Sonic relay.
@@ -26,6 +26,12 @@ import { shouldTranslateToEnglish, translateLineToEnglish } from "./translate";
 
 const AUDIO_INPUT_SAMPLE_RATE = 16000;
 const AUDIO_OUTPUT_SAMPLE_RATE = 24000;
+
+/** 512 samples @16kHz ≈ 32ms — Sonic's VAD needs a continuous stream, silence included. */
+const SILENCE_B64 = Buffer.alloc(1024).toString("base64");
+
+/** Injected USER text to kick off the opening turn; filtered from the live transcript. */
+const OPENING_TRIGGER = "\u200b";
 
 /**
  * An async iterable the Bedrock SDK can consume, that we can push into from
@@ -104,6 +110,25 @@ interface SonicSession {
  * are built from textOutput events and this is an input.
  */
 function injectSystemNote(session: SonicSession, note: string): void {
+  injectUserTextTurn(session, note);
+}
+
+/** Push silent PCM frames so Sonic's VAD sees an open mic before the browser worklet is up. */
+function injectSilentAudio(session: SonicSession, frames: number): void {
+  for (let i = 0; i < frames; i++) {
+    session.queue.push({
+      event: {
+        audioInput: {
+          promptName: session.promptName,
+          contentName: session.audioContentName,
+          content: SILENCE_B64,
+        },
+      },
+    });
+  }
+}
+
+function injectUserTextTurn(session: SonicSession, text: string): void {
   const contentName = randomUUID();
 
   session.queue.push({
@@ -119,11 +144,16 @@ function injectSystemNote(session: SonicSession, note: string): void {
     },
   });
   session.queue.push({
-    event: { textInput: { promptName: session.promptName, contentName, content: note } },
+    event: { textInput: { promptName: session.promptName, contentName, content: text } },
   });
   session.queue.push({
     event: { contentEnd: { promptName: session.promptName, contentName } },
   });
+}
+
+function isOpeningTrigger(text: string): boolean {
+  const t = text.trim();
+  return t === OPENING_TRIGGER || t === "." || t === "…";
 }
 
 /** Closes the Bedrock stream cleanly so Sonic flushes its final audio. */
@@ -290,6 +320,72 @@ export function attachNovaSonicRelay(server: Server): void {
     let session: SonicSession = newSonicSession();
     let attempt = 0;
     let finished = false;
+    let openingKickTimer: ReturnType<typeof setTimeout> | null = null;
+    let candidateSpokeThisStream = false;
+    let openingKickFired = false;
+    let serverSilenceTimer: ReturnType<typeof setInterval> | null = null;
+    let clientMicActive = false;
+
+    const cancelOpeningKick = () => {
+      if (openingKickTimer) {
+        clearTimeout(openingKickTimer);
+        openingKickTimer = null;
+      }
+    };
+
+    const stopServerSilence = () => {
+      if (serverSilenceTimer) {
+        clearInterval(serverSilenceTimer);
+        serverSilenceTimer = null;
+      }
+    };
+
+    /** Keeps Sonic's VAD alive until the browser mic worklet is streaming. */
+    const startServerSilence = () => {
+      if (serverSilenceTimer) return;
+      serverSilenceTimer = setInterval(() => {
+        if (session.closed || !session.ready) {
+          stopServerSilence();
+          return;
+        }
+        const fresh = getSession(prepared.id);
+        if (fresh?.transcripts.some((t) => t.sender === "interviewer")) {
+          stopServerSilence();
+          return;
+        }
+        if (clientMicActive) {
+          stopServerSilence();
+          return;
+        }
+        session.queue.push({
+          event: {
+            audioInput: {
+              promptName: session.promptName,
+              contentName: session.audioContentName,
+              content: SILENCE_B64,
+            },
+          },
+        });
+      }, 32);
+    };
+
+    const fireOpeningKick = () => {
+      if (openingKickFired || session.closed || !session.ready) return;
+      if (candidateSpokeThisStream) return;
+      const fresh = getSession(prepared.id) ?? prepared;
+      if (fresh.transcripts.some((t) => t.sender === "interviewer")) return;
+
+      openingKickFired = true;
+      cancelOpeningKick();
+
+      console.log(`[Sonic] ${prepared.id} — opening kick (candidate silent)`);
+      injectSilentAudio(session, 32);
+      injectUserTextTurn(session, OPENING_TRIGGER);
+      injectSystemNote(
+        session,
+        `[The candidate is connected and silent. Start the interview NOW: deliver your opening greeting exactly as in HOW TO OPEN, then ask your first question.]`
+      );
+    };
     /**
      * Mic chunks that arrived while the Bedrock stream was being re-established.
      * 32ms per chunk, so this is ~2s of audio — enough to cover a reconnect
@@ -305,6 +401,8 @@ export function attachNovaSonicRelay(server: Server): void {
     const teardown = (reason: string) => {
       if (session.closed) return;
       session.closed = true;
+      cancelOpeningKick();
+      stopServerSilence();
       console.log(`[Sonic] Session closing: ${reason}`);
       session.queue.close();
       // Give the queued contentEnd/promptEnd/sessionEnd two seconds to reach
@@ -335,6 +433,8 @@ export function attachNovaSonicRelay(server: Server): void {
             if (pendingAudio.length > MAX_PENDING_AUDIO_CHUNKS) pendingAudio.shift();
             return;
           }
+          clientMicActive = true;
+          stopServerSilence();
           session.queue.push({
             event: {
               audioInput: {
@@ -406,6 +506,13 @@ export function attachNovaSonicRelay(server: Server): void {
               `Your last question, which is still open, was: "${lastQ.slice(0, 500)}". ` +
               `Either stay silent a little longer or repeat ONLY that question in one short sentence, then listen.`
           );
+          break;
+        }
+
+        // Browser backup: candidate still silent ~2s after ready.
+        case "kickoff": {
+          if (!session.ready || session.closed) return;
+          fireOpeningKick();
           break;
         }
 
@@ -563,6 +670,9 @@ export function attachNovaSonicRelay(server: Server): void {
       },
     });
 
+    // Prime VAD before the browser mic worklet connects (~1s of silence).
+    injectSilentAudio(session, 32);
+
     session.ready = true;
     };
 
@@ -636,19 +746,17 @@ export function attachNovaSonicRelay(server: Server): void {
 
         send({ type: "ready" });
 
-        // Nova Sonic waits for a USER turn before the assistant speaks. On a fresh
-        // call the candidate is silently waiting — nudge the interviewer to greet
-        // first without faking a candidate line in the transcript.
+        // Fresh interview: keep silence flowing server-side until the mic is up,
+        // then nudge the interviewer to open if the candidate stays quiet.
         if (!resumeNote && !prepared.transcripts.some((t) => t.sender === "interviewer")) {
-          setTimeout(() => {
+          startServerSilence();
+          cancelOpeningKick();
+          candidateSpokeThisStream = false;
+          openingKickTimer = setTimeout(() => {
+            openingKickTimer = null;
             if (session.closed || !session.ready || ws.readyState !== WebSocket.OPEN) return;
-            injectSystemNote(
-              session,
-              `[The candidate has joined and is waiting on the line. YOU speak first: ` +
-                `deliver your opening greeting now, then ask your first question. ` +
-                `Do not wait for them to say hello — they are expecting you to start.]`
-            );
-          }, 800);
+            fireOpeningKick();
+          }, 2000);
         }
 
         // Replay whatever the candidate said while we were reconnecting.
@@ -692,9 +800,10 @@ export function attachNovaSonicRelay(server: Server): void {
             // Sonic occasionally emits control payloads (e.g. {"interrupted":true})
             // through the same channel as speech. Those are not dialogue.
             const isControlPayload = /^\s*[{[]/.test(text) && /"\w+"\s*:/.test(text);
+            const isSyntheticOpening = sender === "candidate" && isOpeningTrigger(text);
 
             const seen = recentlyEmitted[sender];
-            if (text && !isControlPayload && !seen.includes(text)) {
+            if (text && !isControlPayload && !isSyntheticOpening && !seen.includes(text)) {
               seen.push(text);
               if (seen.length > DEDUPE_WINDOW) seen.shift();
               send({ type: "transcript", sender, text });
@@ -702,15 +811,22 @@ export function attachNovaSonicRelay(server: Server): void {
               // Persist server-side so the result survives the browser closing.
               appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
 
-              if (sender === "interviewer" && !isPingTurn(text)) {
-                updateSession(prepared.id, { lastQuestionAsked: text });
+              if (sender === "candidate") {
+                candidateSpokeThisStream = true;
+                cancelOpeningKick();
               }
 
-              // Sonic ASR follows the spoken language — Hindi answers land in
-              // Devanagari even on an English interview. Translate async so the
-              // live transcript can show English without blocking audio.
-              if (shouldTranslateToEnglish(text, lang.code)) {
-                void translateLineToEnglish(text, lang.label).then((textEn) => {
+              if (sender === "interviewer") {
+                stopServerSilence();
+                if (!isPingTurn(text)) {
+                  updateSession(prepared.id, { lastQuestionAsked: text });
+                }
+                cancelOpeningKick();
+              }
+
+              // Devanagari ASR → Roman Hinglish for the live transcript display.
+              if (shouldLocalizeTranscript(text, lang.code)) {
+                void translateLineToHinglish(text).then((textEn) => {
                   if (!textEn || textEn === text) return;
                   patchTranscriptEnglish(prepared.id, text, textEn);
                   send({ type: "transcript_en", text, textEn });

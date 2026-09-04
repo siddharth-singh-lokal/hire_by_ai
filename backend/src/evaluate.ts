@@ -56,7 +56,7 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 - **A skill they did not list but clearly have is a PLUS.** Resumes undersell constantly. Credit demonstrated ability regardless of whether it was claimed.
 - **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
 - **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
-${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** Assess the CONTENT of the answers exactly as you would in English — depth, ownership, reasoning — and never treat the choice of language, or code-switching with English, as a weakness. The transcript below is in English for readability. Quote candidate speech in **English** in every evidence field.
+${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** Assess CONTENT only — language choice is never a weakness. The transcript below is in Roman Hinglish for readability. Quote candidate speech in **Roman Hinglish** in every evidence field.
 ` : ""}- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
 - **Silence before the interviewer opened does not count against Communication.** If the first lines in the transcript are only from the interviewer, the candidate was waiting to be greeted — score Communication from their answers once the conversation was actually underway, not from pre-greeting silence.
 
@@ -118,7 +118,7 @@ Separately from proctoring, judge whether the answers sound like this person's o
 RULES
 - Any axis you score ABOVE OR BELOW 3 needs at least one VERBATIM quote from the candidate. If you cannot quote them, the honest score is 3 and the justification says the topic was not established.
 - Never invent quotes. If the transcript is thin, say so plainly — "not established in this screen" is a legitimate and useful finding, and far more useful than a confident score with nothing behind it.
-- evidenceMoments: pick the 3-6 moments that would most change a hiring manager's mind, positive or negative. Use the timestamp in seconds from the transcript. The "quote" field must be in English.
+- evidenceMoments: pick the 3-6 moments that would most change a hiring manager's mind, positive or negative. Use the timestamp in seconds from the transcript. The "quote" field must be in Roman Hinglish (Latin script) when the candidate spoke Hindi/Hinglish.
 - gapMatrix: one row per JD requirement, stating what the interview actually established.
 - r1Briefing.skip: only topics genuinely nailed. Getting this wrong wastes the engineer's hour, which is the entire thing we are trying to save.
 - r1Briefing.probe: weak, dodged, or uncovered — with a concrete question R1 should ask.

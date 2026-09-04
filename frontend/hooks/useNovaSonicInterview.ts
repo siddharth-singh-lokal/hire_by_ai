@@ -152,6 +152,9 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** 512 samples @16kHz — keeps Sonic's VAD alive before the mic worklet streams. */
+const SILENCE_FRAME_B64 = toBase64(new Uint8Array(1024));
+
 function fromBase64(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -198,6 +201,10 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   /** Nudges the relay after long silence so the interviewer stays on the last question. */
   const silenceNudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const silenceNudgeSentRef = useRef(false);
+  /** Sends silent frames until the mic worklet is streaming (Sonic needs continuous audio). */
+  const preMicSilenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const openingKickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const micStreamingRef = useRef(false);
   const startInterviewRef = useRef<(() => Promise<void>) | null>(null);
 
   /** Decays the user's meter so it falls smoothly instead of snapping to zero. */
@@ -232,6 +239,15 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       silenceNudgeTimerRef.current = null;
     }
     silenceNudgeSentRef.current = false;
+    if (preMicSilenceTimerRef.current) {
+      clearInterval(preMicSilenceTimerRef.current);
+      preMicSilenceTimerRef.current = null;
+    }
+    if (openingKickTimerRef.current) {
+      clearTimeout(openingKickTimerRef.current);
+      openingKickTimerRef.current = null;
+    }
+    micStreamingRef.current = false;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "stop" }));
@@ -382,6 +398,31 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             wsAttemptsRef.current = 0;
             setReconnecting(false);
             setConnectionState("active");
+            micStreamingRef.current = false;
+            if (!preMicSilenceTimerRef.current) {
+              preMicSilenceTimerRef.current = setInterval(() => {
+                if (micStreamingRef.current || intentionalCloseRef.current) {
+                  if (preMicSilenceTimerRef.current) {
+                    clearInterval(preMicSilenceTimerRef.current);
+                    preMicSilenceTimerRef.current = null;
+                  }
+                  return;
+                }
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(
+                    JSON.stringify({ type: "audio", data: SILENCE_FRAME_B64 })
+                  );
+                }
+              }, 32);
+            }
+            if (openingKickTimerRef.current) clearTimeout(openingKickTimerRef.current);
+            openingKickTimerRef.current = setTimeout(() => {
+              openingKickTimerRef.current = null;
+              if (intentionalCloseRef.current || closingRef.current) return;
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: "kickoff" }));
+              }
+            }, 2000);
             break;
 
           case "audio": {
@@ -577,6 +618,13 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         if (!pcm) return;
 
         if (wsRef.current?.readyState === WebSocket.OPEN) {
+          if (!micStreamingRef.current) {
+            micStreamingRef.current = true;
+            if (preMicSilenceTimerRef.current) {
+              clearInterval(preMicSilenceTimerRef.current);
+              preMicSilenceTimerRef.current = null;
+            }
+          }
           wsRef.current.send(
             JSON.stringify({ type: "audio", data: toBase64(new Uint8Array(pcm)) })
           );

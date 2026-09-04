@@ -2,7 +2,7 @@ import { evaluateInterview, evaluateGeneric } from "./evaluate";
 import { loadContextPack } from "./questionBank";
 import { getSession, updateSession } from "./sessionStore";
 import { LANGUAGES } from "./languages";
-import { sessionNeedsEnglishTranslation, translateTranscriptToEnglish } from "./translate";
+import { sessionNeedsTranscriptLocalization, translateTranscriptToHinglish } from "./translate";
 
 function languageLabel(code?: string): string {
   return (code && LANGUAGES[code as keyof typeof LANGUAGES]?.label) || "English";
@@ -53,13 +53,9 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
   const started = Date.now();
 
   try {
-    // Non-English screens, and English screens where the candidate spoke Hindi,
-    // are translated to English (original kept) so the recruiter can read them.
-    if (sessionNeedsEnglishTranslation(session.transcripts, session.language)) {
-      const translated = await translateTranscriptToEnglish(
-        session.transcripts,
-        languageLabel(session.language)
-      );
+    // Roman Hinglish display (original Devanagari kept in `text`) for recruiter readability.
+    if (sessionNeedsTranscriptLocalization(session.transcripts, session.language)) {
+      const translated = await translateTranscriptToHinglish(session.transcripts);
       updateSession(sessionId, { transcripts: translated });
     }
 

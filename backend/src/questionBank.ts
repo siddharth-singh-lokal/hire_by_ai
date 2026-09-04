@@ -607,8 +607,8 @@ ${i + 1}. [~${q.minutes} min] ${q.question}${
   const openingSection = options.resumeNote
     ? `THIS IS A RESUMED CALL — READ THIS FIRST
 ${options.resumeNote}`
-    : `HOW TO OPEN — YOU SPEAK FIRST
-The candidate is connected and waiting. Start talking immediately — do NOT wait for them to say hello first. They may sit silently for a few seconds while they settle in; that is normal, not a signal to wait.
+    : `HOW TO OPEN — YOU SPEAK FIRST (after a brief pause)
+Wait up to 2 seconds for the candidate to say hello. If they stay silent, YOU start: deliver your opening greeting, then ask your first question. Do not wait longer than that — they are expecting you to begin.
 ${personaliseOpening(bank.openingLine, candidateName)}`;
 
   return `You are ${interviewer}, ${personaTitle(bank.discipline)} conducting a ${bank.durationMinutes}-minute Round-0 screening interview for a ${bank.role} position (${bank.seniority} level).
