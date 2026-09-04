@@ -2,7 +2,12 @@ import { randomUUID } from "crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
-import { sonicClient, SONIC_MODEL_ID } from "./bedrock";
+import { getSonicClient, refreshBedrockClients, SONIC_MODEL_ID } from "./bedrock";
+import {
+  isCredentialError,
+  maybeReloadCredentials,
+  reloadCredentialsFromEnv,
+} from "./awsCredentials";
 import { getSession, updateSession, appendTranscript, patchTranscriptEnglish, recordStreamDrop, shouldResumeInterview } from "./sessionStore";
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt, estimateFurthestQuestionIndex, isOpeningLine, personaliseOpening } from "./questionBank";
@@ -304,6 +309,11 @@ export function attachNovaSonicRelay(server: Server): void {
       updateSession(prepared.id, { status: "in_progress", startedAt: Date.now() });
     }
 
+    // Pick up a freshly pasted workshop triple without restarting the server.
+    if (maybeReloadCredentials()) {
+      refreshBedrockClients();
+    }
+
     // Interview language decides the voice and a prompt directive. Unsupported
     // codes fall back to English inside resolveLanguage, so a bad value never
     // hands Sonic a locale it cannot speak.
@@ -319,6 +329,7 @@ export function attachNovaSonicRelay(server: Server): void {
     // candidate's WebSocket stays open. See startStream below.
     let session: SonicSession = newSonicSession();
     let attempt = 0;
+    let credentialRefreshAttempted = false;
     let finished = false;
     let openingKickTimer: ReturnType<typeof setTimeout> | null = null;
     let candidateSpokeThisStream = false;
@@ -781,7 +792,7 @@ export function attachNovaSonicRelay(server: Server): void {
       bootstrap(resumeNote);
 
       try {
-        const response = await sonicClient.send(
+        const response = await getSonicClient().send(
           new InvokeModelWithBidirectionalStreamCommand({
             modelId: SONIC_MODEL_ID,
             body: session.queue as any,
@@ -957,6 +968,32 @@ export function attachNovaSonicRelay(server: Server): void {
           ? ` [origin ${err.originalStatusCode}: ${err?.originalMessage || ""}]`
           : "";
         const label = `${err?.name || "Error"}: ${err?.message || "unknown"}${origin}`;
+
+        // Workshop credentials expire mid-demo. Re-read backend/.env once and
+        // retry so the recruiter can paste a fresh triple and the candidate
+        // can tap Rejoin — no server restart required.
+        if (
+          isCredentialError(err) &&
+          !credentialRefreshAttempted &&
+          !finished &&
+          ws.readyState === WebSocket.OPEN
+        ) {
+          credentialRefreshAttempted = true;
+          const changed = reloadCredentialsFromEnv(true);
+          refreshBedrockClients();
+          if (++attempt <= MAX_STREAM_ATTEMPTS) {
+            console.warn(
+              `[Sonic] ${prepared.id} — credentials expired; reloaded .env ` +
+                `(changed=${changed}), retrying stream (${attempt}/${MAX_STREAM_ATTEMPTS})`
+            );
+            send({ type: "reconnecting", attempt });
+            const resumeNote = buildResumeNote();
+            session = newSonicSession();
+            await new Promise((r) => setTimeout(r, 400));
+            return startStream(resumeNote);
+          }
+        }
+
         const recoverable = RECOVERABLE.test(label);
 
         if (recoverable && !finished && ws.readyState === WebSocket.OPEN && ++attempt <= MAX_STREAM_ATTEMPTS) {
@@ -989,8 +1026,8 @@ export function attachNovaSonicRelay(server: Server): void {
           recoverable,
           message: recoverable
             ? "The voice connection dropped and could not be restored. Please rejoin."
-            : /expired|security token/i.test(err?.message || "")
-            ? "Session credentials have expired. Please contact the recruiter."
+            : isCredentialError(err)
+            ? "AWS credentials expired. Recruiter: paste a fresh key/secret/token into backend/.env, save the file, then tap Rejoin — no server restart needed."
             : err?.message || "The interview stream failed unexpectedly.",
         });
         // Leave the session in_progress so the candidate can rejoin — do not grade.

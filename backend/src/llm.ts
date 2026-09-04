@@ -1,5 +1,6 @@
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import { bedrockClient, extractJson } from "./bedrock";
+import { getBedrockClient, extractJson, refreshBedrockClients } from "./bedrock";
+import { isCredentialError, reloadCredentialsFromEnv } from "./awsCredentials";
 
 /**
  * One call site for every TEXT model call — question bank generation, grading,
@@ -77,18 +78,26 @@ export interface TextCallResult {
   model: string;
 }
 
-async function callBedrock(input: TextCallInput): Promise<string> {
-  const response = await bedrockClient.send(
-    new ConverseCommand({
-      modelId: input.modelId,
-      system: [{ text: input.system }],
-      messages: [{ role: "user", content: [{ text: input.user }] }],
-      inferenceConfig: { maxTokens: input.maxTokens, temperature: input.temperature },
-    })
-  );
-  const text = response.output?.message?.content?.[0]?.text;
-  if (!text) throw new Error("Bedrock returned an empty response.");
-  return text;
+async function callBedrock(input: TextCallInput, retried = false): Promise<string> {
+  try {
+    const response = await getBedrockClient().send(
+      new ConverseCommand({
+        modelId: input.modelId,
+        system: [{ text: input.system }],
+        messages: [{ role: "user", content: [{ text: input.user }] }],
+        inferenceConfig: { maxTokens: input.maxTokens, temperature: input.temperature },
+      })
+    );
+    const text = response.output?.message?.content?.[0]?.text;
+    if (!text) throw new Error("Bedrock returned an empty response.");
+    return text;
+  } catch (err) {
+    if (!retried && isCredentialError(err) && reloadCredentialsFromEnv(true)) {
+      refreshBedrockClients();
+      return callBedrock(input, true);
+    }
+    throw err;
+  }
 }
 
 async function callOpenRouter(input: TextCallInput): Promise<{ text: string; model: string }> {

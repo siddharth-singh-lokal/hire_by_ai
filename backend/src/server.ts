@@ -3,7 +3,8 @@ import "./env";
 import express, { Request, Response } from "express";
 import { createServer } from "http";
 import cors from "cors";
-import { EVALUATION_MODEL_ID, GENERATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
+import { EVALUATION_MODEL_ID, GENERATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION, refreshBedrockClients } from "./bedrock";
+import { awsCredentialStatus, reloadCredentialsFromEnv } from "./awsCredentials";
 import { callJson } from "./llm";
 import { attachNovaSonicRelay } from "./novaSonic";
 import { generateQuestionBank, loadContextPack, InterviewDuration, QuestionBank } from "./questionBank";
@@ -37,6 +38,7 @@ app.use(express.json({ limit: "10mb" }));
 
 // Health Check Endpoint
 app.get("/health", (_req: Request, res: Response) => {
+  const aws = awsCredentialStatus();
   res.json({
     status: "ok",
     service: "round0-ai-backend",
@@ -44,11 +46,13 @@ app.get("/health", (_req: Request, res: Response) => {
     evaluationModel: EVALUATION_MODEL_ID,
     voiceModel: SONIC_MODEL_ID,
     textProvider: llmProviderStatus(),
+    awsCredentials: aws,
     timestamp: new Date().toISOString(),
   });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
+  const aws = awsCredentialStatus();
   res.json({
     status: "ok",
     service: "round0-ai-backend",
@@ -56,6 +60,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
     evaluationModel: EVALUATION_MODEL_ID,
     voiceModel: SONIC_MODEL_ID,
     textProvider: llmProviderStatus(),
+    awsCredentials: aws,
     timestamp: new Date().toISOString(),
   });
 });
@@ -332,6 +337,14 @@ if (process.env.NODE_ENV !== "production") {
     });
   });
   console.log("[Dev] POST /api/dev/prepare-from-bank enabled (NODE_ENV != production)");
+
+  app.post("/api/dev/reload-credentials", (_req: Request, res: Response) => {
+    const changed = reloadCredentialsFromEnv(true);
+    if (changed) refreshBedrockClients();
+    const aws = awsCredentialStatus();
+    return res.json({ success: true, changed, awsCredentials: aws });
+  });
+  console.log("[Dev] POST /api/dev/reload-credentials enabled (NODE_ENV != production)");
 }
 
 // 1b-iii. Admin list of every prepared interview and its outcome.
@@ -645,7 +658,16 @@ const httpServer = createServer(app);
 attachNovaSonicRelay(httpServer);
 
 httpServer.listen(PORT, () => {
+  reloadCredentialsFromEnv(true);
+  const aws = awsCredentialStatus();
   console.log(`[Round-0 Backend] Server running on http://localhost:${PORT}`);
   console.log(`[Round-0 Backend] Voice relay at ws://localhost:${PORT}/ws/interview`);
   console.log(`[Round-0 Backend] Region ${AWS_REGION} | Voice ${SONIC_MODEL_ID}`);
+  if (!aws.configured) {
+    console.warn(`[Round-0 Backend] AWS credentials NOT configured — ${aws.hint}`);
+  } else {
+    console.log(
+      `[Round-0 Backend] AWS credentials loaded from ${aws.source} (${aws.envFile})`
+    );
+  }
 });

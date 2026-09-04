@@ -623,6 +623,13 @@ function InterviewRoom() {
                   <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto leading-relaxed">
                     {error || "The interview stream stopped unexpectedly."}
                   </p>
+                  {error?.toLowerCase().includes("credential") && (
+                    <p className="text-[11px] text-amber-400/90 mt-2 max-w-sm mx-auto leading-relaxed">
+                      Recruiter: paste a fresh AWS key, secret, and session token into{" "}
+                      <code className="text-amber-300">backend/.env</code>, save, then tap{" "}
+                      <strong>Rejoin</strong> — no server restart needed.
+                    </p>
+                  )}
                   <p className="text-[11px] text-slate-500 mt-2">
                     Your conversation so far has been saved.
                   </p>

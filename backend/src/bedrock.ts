@@ -1,5 +1,6 @@
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttp2Handler } from "@smithy/node-http-handler";
+import { getExplicitCredentials } from "./awsCredentials";
 
 
 /**
@@ -54,40 +55,64 @@ export const SONIC_MODEL_ID = process.env.BEDROCK_SONIC_MODEL_ID || "amazon.nova
 export const SONIC_REGION =
   process.env.BEDROCK_SONIC_REGION || AWS_REGION;
 
-/**
- * Credentials resolve through the default provider chain, which picks up
- * AWS_PROFILE / AWS_ACCESS_KEY_ID+SECRET+SESSION_TOKEN from the environment.
- * Workshop credentials are temporary, so a 403 here usually means the event
- * session expired rather than anything being misconfigured.
- */
-export const bedrockClient = new BedrockRuntimeClient({ region: AWS_REGION });
+function clientBaseConfig(region: string) {
+  const explicit = getExplicitCredentials();
+  return explicit ? { region, credentials: explicit } : { region };
+}
+
+function createBedrockClient(): BedrockRuntimeClient {
+  return new BedrockRuntimeClient(clientBaseConfig(AWS_REGION));
+}
+
+function createSonicClient(): BedrockRuntimeClient {
+  return new BedrockRuntimeClient({
+    ...clientBaseConfig(SONIC_REGION),
+    requestHandler: new NodeHttp2Handler({
+      requestTimeout: 540000,
+      sessionTimeout: 540000,
+      disableConcurrentStreams: true,
+      maxConcurrentStreams: 1,
+    }),
+  });
+}
+
+let bedrockClientInstance: BedrockRuntimeClient | null = null;
+let sonicClientInstance: BedrockRuntimeClient | null = null;
+
+/** Text-model client (Converse / InvokeModel). Never use for the voice stream. */
+export function getBedrockClient(): BedrockRuntimeClient {
+  if (!bedrockClientInstance) bedrockClientInstance = createBedrockClient();
+  return bedrockClientInstance;
+}
 
 /**
- * A SEPARATE client used ONLY for the Nova Sonic bidirectional voice stream.
- *
- * This is the fix for the frequent NGHTTP2_INTERNAL_ERROR mid-call drops. The
- * SDK does not flag InvokeModelWithBidirectionalStream as an event stream, so
- * with the default handler the long-lived voice stream leases a POOLED HTTP/2
- * session shared with every Converse/grading call. When that connection is
- * recycled (GOAWAY) or any unrelated request on it fails, the shared session is
- * destroyed and the live call dies — surfacing as NGHTTP2_INTERNAL_ERROR (a
- * known unfixed Node http2 GOAWAY race, nodejs/node#55888).
- *
- * disableConcurrentStreams:true forces an ISOLATED HTTP/2 connection per call
- * (its own TCP+TLS), so nothing else can tear it down. Timeouts are set above
- * Sonic's own 8-minute connection ceiling so the service limit, not our client,
- * is what ends a long interview. Never use this client for Converse/InvokeModel,
- * and never use bedrockClient for the voice stream.
+ * Voice-only client with an isolated HTTP/2 connection per stream.
+ * See the comment block that used to live here — the NGHTTP2 fix is unchanged.
  */
-export const sonicClient = new BedrockRuntimeClient({
-  region: SONIC_REGION,
-  requestHandler: new NodeHttp2Handler({
-    requestTimeout: 540000,
-    sessionTimeout: 540000,
-    disableConcurrentStreams: true,
-    maxConcurrentStreams: 1,
-  }),
-});
+export function getSonicClient(): BedrockRuntimeClient {
+  if (!sonicClientInstance) sonicClientInstance = createSonicClient();
+  return sonicClientInstance;
+}
+
+/** Drop cached clients so the next call picks up reloaded credentials. */
+export function refreshBedrockClients(): void {
+  bedrockClientInstance?.destroy?.();
+  sonicClientInstance?.destroy?.();
+  bedrockClientInstance = null;
+  sonicClientInstance = null;
+}
+
+/** @deprecated Use getBedrockClient() — kept so older imports keep compiling. */
+export const bedrockClient = {
+  send: (...args: Parameters<BedrockRuntimeClient["send"]>) =>
+    getBedrockClient().send(...args),
+} as BedrockRuntimeClient;
+
+/** @deprecated Use getSonicClient() */
+export const sonicClient = {
+  send: (...args: Parameters<BedrockRuntimeClient["send"]>) =>
+    getSonicClient().send(...args),
+} as BedrockRuntimeClient;
 
 /** Strips markdown fences the model sometimes wraps JSON in. */
 export function extractJson(raw: string): any {
