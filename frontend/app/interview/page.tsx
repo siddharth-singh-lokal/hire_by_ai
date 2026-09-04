@@ -27,7 +27,7 @@ import {
   RED_FLAG_WARNINGS,
   type RedFlag,
 } from "@/lib/sessionStore";
-import { completeInterview, uploadRecording, fetchCandidateSession, type CandidateSessionDetail } from "@/lib/api";
+import { completeInterview, uploadProctoringFlag, uploadRecording, fetchCandidateSession, type CandidateSessionDetail } from "@/lib/api";
 import { languagePhrase } from "@/lib/languages";
 import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
 
@@ -193,10 +193,46 @@ function InterviewRoom() {
   const lastVoiceAtRef = useRef(0);
   const localStreamRef = useRef<MediaStream | null>(null);
   const clipBusyRef = useRef(false);
+  const pendingUploadsRef = useRef<Promise<void>[]>([]);
 
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
+
+  const toProctoringPayload = useCallback(
+    (f: RedFlag, clip?: string | null) => ({
+      id: f.id,
+      type: f.type,
+      description: f.description,
+      timeInSeconds: f.timeInSeconds,
+      snapshot: f.snapshotUrl,
+      clip: clip ?? f.clipUrl ?? null,
+    }),
+    []
+  );
+
+  const queueProctoringUpload = useCallback(
+    (flag: RedFlag, clip?: string | null) => {
+      if (!sessionId) return;
+      const payload = toProctoringPayload(flag, clip);
+      const task = uploadProctoringFlag(sessionId, payload)
+        .then(() => undefined)
+        .catch((e) => console.error("[proctoring] evidence upload failed:", e));
+      pendingUploadsRef.current.push(task);
+      void task.finally(() => {
+        pendingUploadsRef.current = pendingUploadsRef.current.filter((p) => p !== task);
+      });
+    },
+    [sessionId, toProctoringPayload]
+  );
+
+  const flushProctoringUploads = useCallback(async () => {
+    const deadline = Date.now() + CLIP_MS + 2000;
+    while (clipBusyRef.current && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    await Promise.allSettled(pendingUploadsRef.current);
+  }, []);
 
   const finishInterview = useCallback(
     async (reason?: string) => {
@@ -225,24 +261,27 @@ function InterviewRoom() {
         }
       }
 
-      // Tell the server the interview is over and hand over the proctoring
-      // flags, which only exist in this browser. The transcript is already
-      // recorded server-side, so grading proceeds even if this call never
-      // lands. Deliberately not awaited — the candidate should not wait.
+      // Sync any remaining proctoring evidence, then mark complete. Both must
+      // finish before we navigate away — otherwise the browser aborts the POST
+      // and the recruiter sees flags with no snapshots.
       if (sessionId) {
-        completeInterview(sessionId, {
-          redFlags: getEvidence().redFlags.map((f) => ({
-            type: f.type,
-            description: f.description,
-            timeInSeconds: f.timeInSeconds,
-            // Base64 frame + short clip captured when the flag fired, so the
-            // recruiter can re-verify it later from their own machine.
-            snapshot: f.snapshotUrl,
-            clip: f.clipUrl,
-          })),
-          durationSeconds: getElapsedSeconds(),
-          terminationReason: reason,
-        }).catch((e) => console.error("Failed to report completion:", e));
+        await flushProctoringUploads();
+        try {
+          await completeInterview(sessionId, {
+            redFlags: getEvidence().redFlags.map((f) => ({
+              id: f.id,
+              type: f.type,
+              description: f.description,
+              timeInSeconds: f.timeInSeconds,
+              snapshot: f.snapshotUrl,
+              clip: f.clipUrl,
+            })),
+            durationSeconds: getElapsedSeconds(),
+            terminationReason: reason,
+          });
+        } catch (e) {
+          console.error("Failed to report completion:", e);
+        }
       }
 
       try {
@@ -254,7 +293,7 @@ function InterviewRoom() {
 
       router.push("/thank-you");
     },
-    [stopRecording, endInterview, sessionId, getElapsedSeconds, candidateName, router]
+    [stopRecording, endInterview, sessionId, getElapsedSeconds, candidateName, router, flushProctoringUploads]
   );
 
   // One shared termination path so a goodbye is only ever spoken once — a
@@ -299,7 +338,11 @@ function InterviewRoom() {
         clipBusyRef.current = false;
         const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
         const reader = new FileReader();
-        reader.onload = () => attachClip(flag.id, String(reader.result));
+        reader.onload = () => {
+          const clipUrl = String(reader.result);
+          attachClip(flag.id, clipUrl);
+          queueProctoringUpload(flag, clipUrl);
+        };
         reader.readAsDataURL(blob);
       };
       rec.start();
@@ -310,12 +353,15 @@ function InterviewRoom() {
       clipBusyRef.current = false;
       console.error("Clip capture failed:", e);
     }
-  }, []);
+  }, [queueProctoringUpload]);
 
   const handleFlag = useCallback(
     (flag: RedFlag) => {
       if (handledFlagsRef.current.has(flag.id)) return;
       handledFlagsRef.current.add(flag.id);
+
+      // Push snapshot to the server immediately — do not wait until the end.
+      queueProctoringUpload(flag);
 
       // Every flag gets a short evidence clip, whatever its type.
       captureClip(flag);
@@ -332,7 +378,7 @@ function InterviewRoom() {
 
       sendControl({ type: "proctor_probe", description: RED_FLAG_WARNINGS[flag.type] });
     },
-    [sendControl, captureClip]
+    [sendControl, captureClip, queueProctoringUpload]
   );
 
   const { faceCount, isReady: proctoringReady, phoneVisible } = useProctoring({

@@ -44,6 +44,8 @@ export interface StoredTranscript {
 }
 
 export interface StoredRedFlag {
+  /** Client-generated id — used to upsert snapshot/clip as they arrive. */
+  id?: string;
   type: string;
   description: string;
   timeInSeconds: number;
@@ -190,7 +192,7 @@ function persistEvidence(session: InterviewSession): void {
 }
 
 /** Re-attaches evidence blobs to a restored session, if a file exists. */
-function restoreEvidence(session: InterviewSession): void {
+export function restoreEvidence(session: InterviewSession): void {
   const file = path.join(EVIDENCE_DIR, `${session.id}.json`);
   if (!fs.existsSync(file)) return;
   try {
@@ -293,8 +295,56 @@ export function createSession(input: {
   return session;
 }
 
+function flagKey(flag: StoredRedFlag): string {
+  if (flag.id) return flag.id;
+  return `${flag.type}:${flag.timeInSeconds}`;
+}
+
+/**
+ * Adds or updates one proctoring flag. Evidence (snapshot, clip) arrives in
+ * separate requests as capture finishes — never wipe an existing blob with an
+ * empty patch.
+ */
+export function upsertRedFlag(sessionId: string, flag: StoredRedFlag): boolean {
+  const session = sessions.get(sessionId);
+  if (!session) return false;
+
+  const key = flagKey(flag);
+  const idx = session.redFlags.findIndex((f) => flagKey(f) === key);
+  const prev = idx >= 0 ? session.redFlags[idx] : undefined;
+  const row: StoredRedFlag = {
+    id: key,
+    type: flag.type,
+    description: flag.description || prev?.description || flag.type,
+    timeInSeconds: flag.timeInSeconds,
+    snapshot: flag.snapshot || prev?.snapshot,
+    clip: flag.clip || prev?.clip,
+  };
+
+  if (idx >= 0) session.redFlags[idx] = row;
+  else session.redFlags.push(row);
+
+  persistEvidence(session);
+  persist();
+  return true;
+}
+
+/** Merge a batch posted on completion — does not drop flags already on disk. */
+export function mergeRedFlags(sessionId: string, flags: StoredRedFlag[]): void {
+  for (const flag of flags) upsertRedFlag(sessionId, flag);
+}
+
 export function getSession(id: string): InterviewSession | undefined {
-  return sessions.get(id);
+  const session = sessions.get(id);
+  if (!session) return undefined;
+  // After a restart the hot store holds metadata only; blobs live in .evidence/.
+  if (
+    session.redFlags.length > 0 &&
+    !session.redFlags.some((f) => f.snapshot || f.clip)
+  ) {
+    restoreEvidence(session);
+  }
+  return session;
 }
 
 /** The candidate's login. Email is the only thing they have to remember. */

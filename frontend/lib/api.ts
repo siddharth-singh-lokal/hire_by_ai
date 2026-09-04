@@ -254,6 +254,30 @@ export function completeInterview(
   return post(`/api/interview/${sessionId}/complete`, input);
 }
 
+/** Upload one proctoring flag (and evidence) as soon as it is captured. */
+export function uploadProctoringFlag(
+  sessionId: string,
+  flag: {
+    id: string;
+    type: string;
+    description: string;
+    timeInSeconds: number;
+    snapshot?: string | null;
+    clip?: string | null;
+  }
+): Promise<{ success: boolean }> {
+  return post(`/api/interview/${sessionId}/proctoring`, {
+    flag: {
+      id: flag.id,
+      type: flag.type,
+      description: flag.description,
+      timeInSeconds: flag.timeInSeconds,
+      snapshot: flag.snapshot || undefined,
+      clip: flag.clip || undefined,
+    },
+  });
+}
+
 export interface ScorecardResponse {
   status: "ready" | "in_progress" | "grading" | "completed" | "failed";
   candidateName?: string;

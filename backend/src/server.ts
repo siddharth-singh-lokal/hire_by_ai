@@ -19,6 +19,8 @@ import {
   updateSession,
   saveRecording,
   getRecording,
+  upsertRedFlag,
+  mergeRedFlags,
 } from "./sessionStore";
 import { gradeSession } from "./grading";
 
@@ -35,6 +37,9 @@ app.use(
 );
 
 app.use(express.json({ limit: "10mb" }));
+
+/** Proctoring evidence can be several MB per flag (JPEG + ~6s clip). */
+const proctoringParser = express.json({ limit: "40mb" });
 
 // Health Check Endpoint
 app.get("/health", (_req: Request, res: Response) => {
@@ -478,11 +483,39 @@ app.get("/api/admin/sessions/:id", (req: Request, res: Response) => {
   return res.json({ session });
 });
 
+// Proctoring evidence is uploaded as each flag fires (and again when the clip
+// finishes) so a tab close at the end cannot lose snapshots the recruiter needs.
+app.post("/api/interview/:id/proctoring", proctoringParser, (req: Request, res: Response) => {
+  const session = getSession(String(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
+  }
+
+  const flag = req.body?.flag;
+  if (!flag?.type) {
+    return res.status(400).json({ error: "MISSING_FLAG", message: "No proctoring flag supplied." });
+  }
+
+  const ok = upsertRedFlag(session.id, {
+    id: flag.id ? String(flag.id) : undefined,
+    type: String(flag.type),
+    description: String(flag.description || flag.type),
+    timeInSeconds: Number(flag.timeInSeconds) || 0,
+    snapshot: flag.snapshot ? String(flag.snapshot) : undefined,
+    clip: flag.clip ? String(flag.clip) : undefined,
+  });
+
+  if (!ok) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
+  }
+  return res.json({ success: true });
+});
+
 // 1b-iv. Interview completion. Proctoring runs in the browser, so the flags and
 // the real elapsed time are posted here. The transcript is NOT taken from the
 // client — the relay already recorded it server-side, which is what makes the
 // result survive a candidate closing the tab.
-app.post("/api/interview/:id/complete", (req: Request, res: Response) => {
+app.post("/api/interview/:id/complete", proctoringParser, (req: Request, res: Response) => {
   const session = getSession(String(req.params.id));
   if (!session) {
     return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
@@ -490,8 +523,21 @@ app.post("/api/interview/:id/complete", (req: Request, res: Response) => {
 
   const { redFlags = [], durationSeconds = 0, terminationReason } = req.body || {};
 
+  if (Array.isArray(redFlags) && redFlags.length > 0) {
+    mergeRedFlags(
+      session.id,
+      redFlags.map((f: any) => ({
+        id: f.id ? String(f.id) : undefined,
+        type: String(f.type || "UNKNOWN"),
+        description: String(f.description || f.type || "Proctoring flag"),
+        timeInSeconds: Number(f.timeInSeconds) || 0,
+        snapshot: f.snapshot ? String(f.snapshot) : undefined,
+        clip: f.clip ? String(f.clip) : undefined,
+      }))
+    );
+  }
+
   updateSession(session.id, {
-    redFlags: Array.isArray(redFlags) ? redFlags : [],
     durationSeconds: Number(durationSeconds) || 0,
     terminationReason,
   });
