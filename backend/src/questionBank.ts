@@ -10,6 +10,7 @@ import {
 } from "./webInterviewResearch";
 import { ContextPack } from "./contextPack/types";
 import { LanguageConfig, LANGUAGES, DEFAULT_LANGUAGE } from "./languages";
+import { getTaxonomyGuidance } from "./questionTaxonomy";
 
 /**
  * Question bank generation.
@@ -84,9 +85,24 @@ const NON_TECHNICAL_RUBRIC_AXES = [
   "Communication",
 ] as const;
 
+/**
+ * People-leadership roles get their own axes. An Engineering Manager or
+ * Director is not assessed on "Stack Fit" — their craft is scope, judgement and
+ * delivery through others. They still need technical credibility, which is what
+ * "Technical Judgement" covers.
+ */
+const LEADERSHIP_RUBRIC_AXES = [
+  "Scope and Impact",
+  "Technical Judgement",
+  "Problem-Solving Mindset",
+  "People and Delivery",
+  "Communication",
+] as const;
+
 const TECHNICAL_DISCIPLINES = new Set(["backend", "frontend", "mobile", "devops", "data"]);
 
 function fixedAxesFor(discipline: string): readonly string[] {
+  if (discipline === "engineering_leadership") return LEADERSHIP_RUBRIC_AXES;
   return TECHNICAL_DISCIPLINES.has(discipline)
     ? FIXED_RUBRIC_AXES
     : NON_TECHNICAL_RUBRIC_AXES;
@@ -202,39 +218,81 @@ export function loadContextPack(): ContextPack | null {
  */
 function inferDiscipline(jdText: string): string {
   const jd = jdText.toLowerCase();
-  const score = (words: string[]) =>
-    words.reduce((n, w) => n + (jd.includes(w) ? 1 : 0), 0);
+  // The role is almost always in the first few lines; the rest of a JD is
+  // company boilerplate. Weighting the title heavily is what stops a shared
+  // "we run Kubernetes, cost-conscious infrastructure" preamble from
+  // classifying every role at the company as devops — which it did, including a
+  // Director of Engineering.
+  const titleBlock = jdText.split(/\n/).slice(0, 6).join(" ").toLowerCase();
 
-  const scores: Record<string, number> = {
-    data: score(["analyst", "analytics", "sql", "dashboard", "bigquery", "data science", "metrics", "reporting", "etl"]),
-    product: score(["product manager", "product management", "prd", "roadmap", "stakeholder", "user research", "go-to-market", "product analyst"]),
-    design: score(["designer", "figma", "ux", "ui design", "wireframe", "prototype", "visual design"]),
-    frontend: score(["frontend", "front-end", "react", "javascript", "typescript", "css", "browser", "next.js"]),
-    mobile: score(["android", "ios", "kotlin", "swift", "react native", "flutter", "mobile app"]),
-    devops: score(["devops", "sre", "infrastructure", "terraform", "ci/cd", "kubernetes", "observability", "on-call"]),
-    backend: score(["backend", "back-end", "api", "django", "server", "microservice", "database", "distributed", "scalab"]),
+  /**
+   * PEOPLE-LEADERSHIP FIRST, and by title only.
+   *
+   * An Engineering Manager's screen is about scope, delivery and people, not
+   * about whichever technologies the company happens to run. Detected ahead of
+   * the keyword scoring because the technical words in a leadership JD are
+   * describing the environment, not the job. Staff / Principal / Tech Lead are
+   * deliberately NOT here — those are individual-contributor roles and should
+   * be classified by craft.
+   */
+  const LEADERSHIP_TITLE =
+    /\b(engineering manager|em\b|director of engineering|head of engineering|vp of engineering|vice president of engineering|senior engineering manager|group engineering manager|director,? engineering|cto)\b/i;
+  const MANAGES_PEOPLE =
+    /(manage|managing|lead)\s+(a\s+)?(pod|team|squad|org|engineers|managers|reports|direct reports)|managing managers|leading leaders|headcount|performance.manage|hiring plan|org design/i;
+
+  if (LEADERSHIP_TITLE.test(titleBlock) || (MANAGES_PEOPLE.test(titleBlock) && MANAGES_PEOPLE.test(jd))) {
+    return "engineering_leadership";
+  }
+
+  const score = (words: string[], text: string) =>
+    words.reduce((n, w) => n + (text.includes(w) ? 1 : 0), 0);
+
+  const KEYWORDS: Record<string, string[]> = {
+    data: ["analyst", "analytics", "sql", "dashboard", "bigquery", "data science", "metrics", "reporting", "etl"],
+    product: ["product manager", "product management", "prd", "roadmap", "stakeholder", "user research", "go-to-market", "product analyst"],
+    design: ["designer", "figma", "ux", "ui design", "wireframe", "prototype", "visual design"],
+    frontend: ["frontend", "front-end", "react", "javascript", "typescript", "css", "browser", "next.js"],
+    mobile: ["android", "ios", "kotlin", "swift", "react native", "flutter", "mobile app"],
+    devops: ["devops", "sre", "site reliability", "terraform", "ci/cd", "platform engineer", "observability", "on-call rotation"],
+    backend: ["backend", "back-end", "api", "django", "server", "microservice", "database", "distributed", "scalab", "postgres"],
+    marketing: ["marketing", "growth", "brand", "campaign", "seo", "performance marketing", "social media", "content marketing", "crm", "user acquisition", "paid media", "copywriter"],
+    support: ["listener", "counsel", "peer support", "mental health", "consultation", "telecalling", "telecaller", "customer support", "customer service", "astrologer", "empathy", "helpline"],
+    field: ["field sales", "field executive", "distribution", "collections", "delivery", "two-wheeler", "kirana", "retail", "on-ground", "territory", "area manager", "beat", "outlet"],
   };
 
-  // Require more than a single incidental keyword. One mention of "Android
-  // phone" in a peer-support listener JD used to classify the whole role as
-  // mobile engineering, which then loaded the wrong role context and asked a
-  // counsellor about Kotlin.
+  // Title hits count triple. A JD headed "Backend Engineer II" is a backend
+  // role even if the boilerplate below it lists more infrastructure words.
+  const TITLE_WEIGHT = 3;
+  const scores: Record<string, number> = {};
+  for (const [name, words] of Object.entries(KEYWORDS)) {
+    scores[name] = score(words, jd) + TITLE_WEIGHT * score(words, titleBlock);
+  }
+
   const MIN_CONFIDENCE = 2;
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
   const [bestName, bestScore] = ranked[0] || ["any", 0];
-  const runnerUp = ranked[1]?.[1] ?? 0;
-  // Also refuse to guess when two disciplines tie — that means the JD is not
-  // clearly either, and "any" produces better questions than a coin flip.
-  if (bestScore < MIN_CONFIDENCE || bestScore === runnerUp) return "any";
+  if (bestScore < MIN_CONFIDENCE) return "any";
+  // A genuine tie is broken by the title alone; only give up if the title is
+  // silent too. Returning "any" on every tie cost a backend SDE-2 its technical
+  // rubric because unrelated boilerplate happened to tie with it.
+  const tied = ranked.filter(([, v]) => v === bestScore).map(([k]) => k);
+  if (tied.length > 1) {
+    const byTitle = tied
+      .map((k) => [k, score(KEYWORDS[k], titleBlock)] as const)
+      .sort((a, b) => b[1] - a[1]);
+    if (byTitle[0][1] > (byTitle[1]?.[1] ?? 0)) return byTitle[0][0];
+    return "any";
+  }
   return bestName;
 }
+
 
 function buildSystemPrompt(
   pack: ContextPack | null,
   plan: { projects: number; technical: number; market: number; scenarios: number; gaps: number },
   duration: InterviewDuration,
   discipline: string,
-  webResearchSection: string
+  webResearchSection: string,
 ): string {
   const roleContext = loadRoleContext(discipline);
   // Only scenarios tagged for this discipline (or genuinely role-agnostic ones).
@@ -324,15 +382,15 @@ USING THE ROLE CONTEXT
 `
     : "";
 
-  return `You are a thoughtful engineer designing a Round-0 SCREENING conversation.
+  return `You are a thoughtful, experienced interviewer designing a Round-0 SCREENING conversation for a ${discipline === "any" ? "" : discipline + " "}role.
 
 WHAT THIS IS, AND WHAT IT IS NOT
 This is the first conversation a candidate has, replacing a non-technical phone screen. Later rounds do the deep technical assessment. Your job is narrow:
 
   Does this person actually know what their resume claims?
-  Are they worth an engineer's hour in the next round?
+  Are they worth an hour of the next interviewer's time?
 
-That is the whole bar. You are NOT deciding whether to hire them, and you are NOT running a senior-level technical gauntlet. A screening round that feels like an interrogation makes good candidates withdraw, and losing good candidates is a far more expensive failure than advancing a mediocre one — the next round catches those anyway.
+That is the whole bar. You are NOT deciding whether to hire them, and you are NOT running a deep senior-level assessment of the craft. A screening round that feels like an interrogation makes good candidates withdraw, and losing good candidates is a far more expensive failure than advancing a mediocre one — the next round catches those anyway.
 
 CALIBRATE ACCORDINGLY
 - Questions should be answerable by someone who genuinely did the work on their resume, and hard to answer convincingly by someone who did not. That contrast is the entire signal.
@@ -342,7 +400,12 @@ CALIBRATE ACCORDINGLY
 - Keep the tone warm and collegial. This is a conversation between engineers, not an examination.
 
 STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
-Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
+Read the JD and résumé to work out what this person actually does — engineering of some kind (backend, frontend, mobile, data, ML, platform, QA, security), or product, design, analytics, marketing and growth, sales and field work, operations, customer support or care. Every question must belong to THAT domain, and to the seniority the JD is hiring at.
+
+Two failure modes to avoid, both of which tell the candidate this interview was not built for them:
+- **Defaulting to engineering.** Do NOT reach for connection pools, message queues, Redis, database internals or system design unless the role is genuinely an engineering one. A marketing candidate gets marketing questions, a PM gets product questions, a support candidate gets questions about handling people.
+- **Testing the wrong altitude.** A junior hire and a lead hire in the SAME discipline need completely different questions. Read the seniority off the JD. A leadership role may barely touch hands-on craft, and testing it on execution detail is a failure of the interview, not of the candidate. Conversely, asking a first-jobber to reason about organisational strategy measures nothing.
+${getTaxonomyGuidance(discipline)}
 ${packSection}${roleSection}
 
 DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.technical} technical question(s), ${plan.market} market question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
@@ -352,9 +415,36 @@ ${
       : ""
   }
 
-INTERVIEW SHAPE — alternate resume, technical, and market questions
-- Do NOT make every question a resume walk-through. Mix resume verification with JD technical questions AND market questions (what candidates report on LeetCode, Blind, Glassdoor for this role).
-- Include exactly ${plan.market} question(s) with kind "market" — grounded in the WEB-GROUNDED section below when present.
+WHAT THIS SCREEN MUST ESTABLISH — four things, and only one of them is on the résumé
+
+1. **Do they actually know what they claim?** The résumé is a set of assertions. Someone who did the work can explain a decision they REJECTED and why; someone who watched it happen describes what the thing does. That contrast is the highest-signal moment in a screen.
+2. **Can they do the day-to-day work of THIS role?** Not the résumé's role — this one. Draw from the JD's actual responsibilities. A screen that never asks about the job is not a screen.
+3. **How do they handle not knowing?** This is the most predictive signal for anyone junior, and it is invisible if every question sits inside their comfort zone. "I have not used that, but here is how I would work it out" is a STRONG answer. Confident bluffing about something they clearly have not touched is the weakest possible signal — worse than admitting the gap.
+4. **Will they fit how the work actually happens here?** Judged from how they describe past work, never by asking them to self-assess ("are you a team player?" is worthless).
+
+HOW TO DETECT AN INFLATED RÉSUMÉ — use these moves, they are what separates a screen from a reading
+- **Escalate specificity.** Start general, then ask for the specific thing only a participant would know: the decision they argued about, what broke, what they measured, what they would do differently. Vagueness that survives two follow-ups is the finding.
+- **Ask in the present tense, not the past.** "If you were rebuilding that today, what would you change and why?" beats "why did you choose X over Y" — the second one punishes everyone who was not the decision-maker, which is most juniors and most engineers at service companies. A reply of "that wasn't my call, but the constraint we had was ___" is a GOOD answer.
+- **Cap the depth.** Two to three follow-ups on a topic, then move on, and apply the same cap to every candidate. Escalating until someone fails is a known bias that produces false negatives and tells you nothing you did not already know after the second probe.
+- **Ask about the failure, not the success.** "What went wrong and how did you find out" cannot be answered from a README.
+- **Never accept a keyword as evidence.** If they name a tool, ask what it actually did for them in that project.
+- Do all of this warmly. The goal is to let a real practitioner shine, not to catch someone out — an interrogation makes good candidates withdraw.
+- **Never quiz on anything the résumé does not claim.** No trivia, no definitional recall, no gotchas, no algorithm puzzles — this is a voice call, and a rote oral-exam style round measures nothing useful.
+
+WHAT MISPRONUNCIATION IS NOT
+A garbled tool name, a nervous slip, or an unusual-looking stack is accent and memory, not dishonesty. The only real signal is a candidate who, after two or three focused follow-ups, still cannot add anything beyond what is written on the résumé. Design the questions so that distinction is what surfaces.
+
+TWO QUESTIONS THAT EARN THEIR SLOT FOR JUNIOR AND INTERN ROLES
+- **Expectation realism.** For any intern, fresher or junior, include or fold in "what do you think this job involves day to day?". Candidates who cannot answer it tend to leave within months once they find out, which is the actual risk this screen exists to catch — and it cannot be crammed for.
+- **Ownership under failure.** One question about something that went wrong: a bug they shipped, a call they got wrong, a time they were corrected. Everyone has one. What you are grading is whether they own it or deflect, because that is what predicts working with them. Give them a beat, and offer an easier angle if they blank — some people genuinely cannot produce one on demand.
+
+INTERVIEW SHAPE — never let this become a résumé read-back
+- Do NOT make every question a résumé walk-through. That is the most common way this interview fails: the candidate narrates their CV for five minutes and you learn nothing you could not have read.
+${
+  plan.market > 0
+    ? `- Include exactly ${plan.market} question(s) with kind "market", grounded in the WEB-GROUNDED section below.`
+    : `- Do NOT use the "market" kind at all. There is no verified web grounding for this role, and a "commonly asked on Blind" label with nothing behind it is a false citation. Use "technical" instead.`
+}
 ${webResearchSection}
 
 RUBRIC
@@ -371,9 +461,11 @@ CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort
 QUESTION DESIGN
 - resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot. Use several of these, each on a DIFFERENT project/claim, so the interview covers the breadth of what they've done rather than drilling one thing to death.
 - technical: test a core skill the JD requires — reasoning, tradeoffs, debugging approach, or how they'd solve a realistic problem in this role's domain. Draw from JD responsibilities and required tools/skills, NOT from the resume.
-- market: a question commonly reported for this role on public interview forums (LeetCode Discuss, Blind, Glassdoor). Use the WEB-GROUNDED section. Voice-conversation depth only — not live coding. Set sourceName to the forum (e.g. "Blind") when known; never read URLs aloud.
-${plan.scenarios ? "- scenario: reasoning under realistic constraints, drawn from the org context.\n" : ""}- jd_gap: cover a stated requirement the resume gives no evidence for — asked as a direct question about their experience with it, NOT as a hypothetical scenario.
+${plan.market > 0 ? '- market: a question commonly reported for this role on public interview forums (LeetCode Discuss, Blind, Glassdoor). Use the WEB-GROUNDED section. Voice-conversation depth only — not live coding. Set sourceName to the forum (e.g. "Blind") when known; never read URLs aloud.\n' : ""}
+${plan.scenarios ? "- scenario: reasoning under realistic constraints, drawn from the org context.\n" : ""}- jd_gap: cover a stated requirement the résumé gives no evidence for. Ask directly about their experience with it, NOT as a hypothetical. **This is also where you assess LEARNING ABILITY, which is the point of the question.** If they have not done it, follow with how they would get up to speed — what they would read, who they would ask, how they would verify they had it right — and grade THAT. A candidate missing a day-two skill who describes a credible way to acquire it is a good screening outcome. Someone who bluffs familiarity they do not have is a bad one, regardless of the skill.
 - Every question needs escalations (asked when the answer is strong) and ideally a fallback (a simpler angle if they are struggling).
+- Make at least ONE escalation across the whole set push just past what the résumé evidences — a "what would you do if" that they probably have not faced. Its purpose is not to test knowledge but to see how they behave at the edge of it: reason out loud, ask a clarifying question, say they do not know and how they would find out, or bluff. Grade the behaviour.
+- Fallbacks matter as much as escalations. A candidate who is struggling and gets no easier angle produces no signal at all, and that is a wasted interview rather than a negative finding.
 - strongAnswer/weakAnswer must be specific enough to grade against later. "Good understanding" is useless; "identifies that the pool must close idle connections before the server does" is gradable.
 
 JD COVERAGE — a resume-vs-JD read the recruiter sees alongside the plan.
@@ -539,6 +631,28 @@ export async function generateQuestionBank(opts: {
     count: plan.market,
   });
 
+  /**
+   * Web research is best-effort, so the plan has to adapt to what it actually
+   * found. If it produced no market questions, those slots become `technical`
+   * ones rather than being demanded anyway — asking for a "commonly reported"
+   * question with nothing to ground it in made the model fall back to the most
+   * generic question in existence ("walk me through a project you built"),
+   * duplicating the résumé probes and making the whole screen feel like a
+   * résumé read-back.
+   */
+  const marketAvailable = Math.min(plan.market, webResearch.suggested.length);
+  const effectivePlan = {
+    ...plan,
+    market: marketAvailable,
+    technical: plan.technical + (plan.market - marketAvailable),
+  };
+  if (marketAvailable < plan.market) {
+    console.log(
+      `[questionBank] ${plan.market - marketAvailable} market slot(s) reallocated to technical ` +
+        `(no usable web sources)`
+    );
+  }
+
   const relevantCount = pack
     ? pack.scenarios.filter((sc) => {
         const tags = (sc as any).disciplines as string[] | undefined;
@@ -554,14 +668,41 @@ export async function generateQuestionBank(opts: {
 
   const { parsed } = await callJson({
     modelId: GENERATION_MODEL_ID,
-    system: buildSystemPrompt(pack, plan, duration, discipline, webSection),
+    system: buildSystemPrompt(pack, effectivePlan, duration, discipline, webSection),
     user: `=== JOB DESCRIPTION ===\n${opts.jdText.slice(0, 20000)}\n\n=== CANDIDATE RESUME ===\n${opts.resumeText.slice(0, 20000)}`,
     maxTokens: 8000,
     temperature: 0.4,
     label: "question-bank",
   });
   let questions: BankQuestion[] = (parsed.questions || []).map(normaliseQuestion);
-  questions = mergeMarketQuestions(questions, webResearch, plan.market);
+  questions = mergeMarketQuestions(questions, webResearch, effectivePlan.market);
+
+  // The model sometimes emits a "market" question even when told not to. The
+  // question itself is usually fine, but the LABEL claims a forum source that
+  // does not exist and the scorecard renders it as "commonly asked on LeetCode /
+  // Blind / Glassdoor". Relabel rather than discard: keep the question, drop the
+  // false citation.
+  // A "market" question is a CITATION: the scorecard renders it as "commonly
+  // asked on LeetCode / Blind / Glassdoor". So it only keeps that label if it
+  // can be traced back to a page the research actually retrieved. Checking
+  // `suggested.length` alone was not enough — the model emits market-labelled
+  // questions of its own invention, and search results vary run to run, so the
+  // label survived on questions clearly written from the JD.
+  const citedUrls = new Set(
+    webResearch.suggested.map((sug) => sug.sourceUrl).filter(Boolean) as string[]
+  );
+  let relabelled = 0;
+  questions = questions.map((q) => {
+    if (q.kind !== "market") return q;
+    if (q.sourceUrl && citedUrls.has(q.sourceUrl)) return q; // genuinely grounded
+    relabelled++;
+    return { ...q, kind: "technical" as const, sourceName: undefined, sourceUrl: undefined };
+  });
+  if (relabelled) {
+    console.log(
+      `[questionBank] relabelled ${relabelled} market question(s) as technical — no traceable source`
+    );
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -625,6 +766,14 @@ function personaTitle(discipline?: string): string {
       return "a senior product manager";
     case "design":
       return "a senior designer";
+    case "engineering_leadership":
+      return "an engineering leader here";
+    case "marketing":
+      return "a senior marketing leader";
+    case "support":
+      return "a senior member of the care team";
+    case "field":
+      return "a senior member of the field team";
     default:
       return "a senior member of the hiring team";
   }
@@ -733,6 +882,14 @@ KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or thr
 ACKNOWLEDGE SPECIFICALLY, NEVER GENERICALLY. This is what separates a real conversation from a bot working through a form. Before your next question, react to the ACTUAL CONTENT of what they just said in a few words — name the specific thing. "Swapping the custom SVGs is interesting, since accessibility was the reason you built them" lands; "Got it, that makes sense" is filler that proves you weren't listening. NEVER open a turn with an empty acknowledgement — banned openers include "Got it", "That makes sense", "Makes sense", "Great", "Good", "Interesting", "Thanks for sharing", "Perfect", "Nice". If you have nothing specific to reflect, just ask your next question directly. Vary how you start — do not begin every turn the same way.
 
 PRESS VAGUE ANSWERS — DON'T ACCEPT PLAUSIBLE-SOUNDING FILLER. A generic, textbook, or buzzword answer ("optimize the scripts", "use best practices", "it depends on profiling", "improve caching") is NOT a real answer — it is what someone says when they haven't actually done the work. When you hear one, do not nod along and move to the next question. Ask for the concrete specifics ONCE: "specifically how — walk me through what you actually changed", "give me a real example from something you built", "what number did you see, and what did you do about it". Accept their second answer and move on. The single most valuable thing you can surface is the gap between someone who can name specifics and someone who only has the vocabulary.
+
+WHEN THEY SAY "I DON'T KNOW", NEVER JUST MOVE ON. This is the most informative moment in the whole interview and it is easy to waste. Always ask the follow-up: "That's completely fine — how would you go about finding out?" Someone who names a first concrete step, a person they would ask, or how they would check they got it right has just told you they can pick things up, which for a junior matters more than what they already know. A bare "I don't know" you never followed up on is a wasted question, not a weak candidate — and many candidates do not realise they are allowed to answer that way, so prompt them.
+
+IF A QUESTION IS PROBABLY BEYOND THEM, SAY SO BEFORE ASKING IT. Some questions sit just past someone's experience on purpose. Introduce those with "I don't expect you to know this — I just want to hear how you'd think about it." That turns a gotcha into an invitation. What you are listening for is whether they reason out loud, ask a clarifying question, or name the limit honestly — not whether they get it right. Someone throwing buzzwords at a topic they clearly have not touched is the weakest signal in this interview; someone saying "I haven't done that, but I'd start by..." is one of the strongest.
+
+LET THEM SCOPE A CLAIM DOWN WITHOUT SHAME. If something on their résumé does not survive a follow-up, ask warmly: "how much of that was hands-on for you, and how much was the team?" Résumés are very often padded by recruiters or staffing firms without the candidate's involvement. Someone who honestly narrows their claim has told you something good about themselves — treat it as a fine answer and move on, never as being caught out.
+
+NEVER TREAT A MANGLED NAME AS A PROBLEM. Mispronounced or half-remembered tool names, an odd-sounding stack, a nervous slip, a self-correction — these are accent and memory, not signs that someone is making things up. Do not correct them, do not query the pronunciation, and never let it change how you treat them. What actually matters is whether they can add detail beyond what is written down.
 
 BUILD ON WHAT THEY SAY. This is a conversation, not a questionnaire. A good follow-up usually comes from THEIR last answer, not from your list — chase the interesting thread they opened before returning to the next scripted question. The list is a menu and a safety net, not a script to march through.
 

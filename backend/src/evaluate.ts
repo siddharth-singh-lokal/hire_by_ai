@@ -57,7 +57,11 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 - **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
 - **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
 ${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** Assess CONTENT only — language choice is never a weakness. The transcript below is in Roman Hinglish for readability. Quote candidate speech in **Roman Hinglish** in every evidence field.
-` : ""}- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
+` : ""}- **Score comprehensibility, never fluency.** Judge whether the ideas came through and whether they could clarify when asked. Never score accent, grammar, vocabulary, register, confidence or polish. An unprobed narration round rewards fluent English speakers and filters out good engineers who present poorly — do not reproduce that in the scoring.
+- **"That wasn't my decision" is a strong answer, not evasion**, when followed by the constraint they were under or what they would do differently now. Most candidates, and nearly all juniors, were not the decision-maker. Judge how they reason about the choice today, not whether they personally made it.
+- **On a failure or mistake question, score the ownership, not the incident.** Everyone has shipped a bug. Defensiveness, blaming teammates, or claiming it never happened are the negative signals; a candidate who names what they got wrong and what they changed afterwards is showing you the thing that actually predicts working well with others.
+- **Score each axis on its own evidence before forming the overall verdict.** Do not let a strong or weak first impression bleed across axes.
+- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
 - **Silence before the interviewer opened does not count against Communication.** If the first lines in the transcript are only from the interviewer, the candidate was waiting to be greeted — score Communication from their answers once the conversation was actually underway, not from pre-greeting silence.
 
 WHAT WE ARE ACTUALLY HIRING FOR — read this before you score anything
@@ -68,6 +72,17 @@ We are hiring problem solvers, not people who memorised answers. That distinctio
 - **Do not nitpick.** Missing a refinement, a secondary optimisation, or the "textbook" term for something they described correctly in their own words is not a deduction. Ask yourself "did they understand it?", not "did they say it the way the notes said it?".
 - **This is a conversation, not an exam.** The point is to get to know how this person thinks and works, well enough for a hiring manager to decide whether to spend an hour on them. Judge the whole picture, not each sentence.
 - **Rote fluency is the thing to be suspicious of**, not imprecision. Textbook-perfect recall that collapses the moment you ask "why" is a weaker signal than messy reasoning that holds up.
+
+WHAT IS **NOT** EVIDENCE OF AN INFLATED RÉSUMÉ — read this before you doubt anyone
+This is a voice interview, machine-transcribed, often with a candidate speaking their second or third language. The following are NOT signs of dishonesty and must never be treated as such:
+- **Mispronounced or non-standard tool names.** "Radis" for Redis, "Amazon Beanstalk" for Elastic Beanstalk, a garbled framework name. These are accent and memory, not fraud.
+- **Nervous slips and self-corrections**, or naming the wrong thing and fixing it a sentence later.
+- **An unusual or dated tech choice.** Odd-looking stacks are usually real and constrained by an employer.
+- **Vague on dates, versions, or exact figures.** People forget numbers.
+
+The ONLY reliable signal of inflation is **informational emptiness**: after two or three focused follow-ups the candidate still cannot add anything that is not already on the résumé. Someone who genuinely did the work knows things only visible from the inside — who pushed back, what broke, what the number was before, which option got killed. Someone who watched it happen knows the diagram and the outcome. That is the distinction. Nothing else is.
+
+**When a claim does collapse, do not score it as lying.** Recruiters and consultancies frequently pad résumés without the candidate's involvement, and in Indian service companies people are routinely staffed on narrow slices of the work they are credited with. A candidate who scopes their claim down honestly when asked — "that was the team, I owned this part" — should score WELL for that, not badly.
 
 THE SIGNAL THAT MATTERS MOST
 The single most valuable thing you can detect is a MISMATCH between what the resume claims and what the person can actually discuss. Someone who did the work can explain a decision they rejected and why. Someone narrating a README cannot. Weight that heavily. Everything else is secondary.

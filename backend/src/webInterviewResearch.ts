@@ -39,6 +39,36 @@ export interface WebResearchResult {
 const USER_AGENT =
   "Mozilla/5.0 (compatible; HireByAI/1.0; +https://github.com/lokal/hire-by-ai)";
 
+/**
+ * Reduces a JD's title line to a searchable ROLE, not a marketing headline.
+ *
+ * This was returning the raw first matching line, so a JD headed
+ * "🌍 Backend Intern @ Lokal — Build Tech for Bharat" became the search query
+ * verbatim. Emoji and taglines in a query return search-engine landing pages
+ * instead of interview pages, which then produced hallucinated "market"
+ * questions — and the one it invented was another résumé walk-through, which is
+ * exactly what the market kind exists to avoid.
+ */
+function cleanRoleLine(raw: string): string {
+  return (
+    raw
+      // markdown/bullet decoration
+      .replace(/^#+\s*/, "")
+      .replace(/^[*\-•\s]+/, "")
+      // emoji and pictographs
+      .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{FE00}-\u{FE0F}\u{2B00}-\u{2BFF}]/gu, "")
+      // "Role - X", "Title – X", "Job Title: X", "Position: X"
+      .replace(/^\s*(?:role|title|job\s*title|position|designation)\s*[-–—:]\s*/i, "")
+      // drop everything from the first company/tagline separator onward:
+      // "Backend Intern @ Lokal — Build Tech for Bharat" -> "Backend Intern"
+      .split(/\s+[@|·]\s+|\s+[—–]\s+|\s*\|\s*/)[0]
+      // trailing location/parenthetical noise
+      .replace(/\s*[\(\[].*$/, "")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  );
+}
+
 function extractRoleHint(jdText: string): string {
   const lines = jdText
     .split(/\n/)
@@ -46,15 +76,40 @@ function extractRoleHint(jdText: string): string {
     .filter(Boolean);
   for (const line of lines.slice(0, 8)) {
     if (
-      /(?:engineer|developer|analyst|manager|designer|architect|intern|lead|devops|sre|qa|tester|product|data|mobile|frontend|backend|full.?stack)/i.test(
+      /(?:engineer|developer|analyst|manager|designer|architect|intern|lead|devops|sre|qa|tester|product|data|mobile|frontend|backend|full.?stack|listener|sales|executive|support)/i.test(
         line
       ) &&
-      line.length < 120
+      line.length < 160
     ) {
-      return line.replace(/^#+\s*/, "").replace(/^\*+\s*/, "");
+      const cleaned = cleanRoleLine(line);
+      // A cleaned hint of one or two characters means we stripped everything
+      // meaningful; fall through rather than search for junk.
+      if (cleaned.length >= 3) return cleaned.slice(0, 60);
     }
   }
-  return lines[0]?.slice(0, 100) || "Software Engineer";
+  return cleanRoleLine(lines[0] || "").slice(0, 60) || "Software Engineer";
+}
+
+/**
+ * Does this hit look like an actual interview-questions PAGE, rather than a
+ * site's homepage or an index that happened to rank?
+ *
+ * Without this check, `glassdoor.com/Interview/index.htm` and
+ * `teamblind.com/` counted as successful research and the extractor invented
+ * questions from their marketing copy.
+ */
+function isUsefulHit(h: WebSearchHit): boolean {
+  let path = "";
+  try {
+    path = new URL(h.url).pathname;
+  } catch {
+    return false;
+  }
+  if (/^\/?$/.test(path)) return false; // homepage
+  if (/\/index\.(html?|htm)$/i.test(path)) return false;
+  if (path.replace(/\//g, "").length < 12) return false; // too shallow to be content
+  // Real pages carry a role or company slug, a post id, or a question path.
+  return /interview|question|discuss|post|experience|hiring|prepare/i.test(path);
 }
 
 function siteLabel(url: string): string {
@@ -203,7 +258,8 @@ async function extractQuestions(input: {
     system: `You extract Round-0 SCREENING interview questions from web search snippets about what companies ask for a role.
 
 Rules:
-- Output exactly ${input.count} question(s), each grounded in something from the snippets OR a clearly common theme for this role on LeetCode/Blind/Glassdoor.
+- Output exactly ${input.count} question(s), each grounded in something from the SNIPPETS. If the snippets do not support a question, return fewer — an empty list is a valid and correct answer. Do NOT invent a question to fill the count.
+- NEVER output a résumé walk-through ("walk me through a project you built", "tell me about your most challenging project", "what was your tech stack"). Those already exist elsewhere in this interview, they are what the market kind is meant to ADD to, and duplicating them wastes the slot. A market question must stand on its own without the candidate's résumé.
 - Questions must be answerable in a VOICE conversation in 3-5 minutes — NOT "write code on a whiteboard" or "implement leetcode #42".
 - Prefer questions candidates report on Blind, LeetCode Discuss, Glassdoor — system design at screening depth, debugging stories, tradeoffs, "tell me about a time", domain concepts.
 - Match the discipline: ${input.discipline}. Do NOT ask backend infra questions for a PM or designer.
@@ -269,13 +325,27 @@ export async function researchMarketInterviewQuestions(opts: {
       if (hits.length >= 10) break;
     }
     hits = dedupeHits(hits).slice(0, 12);
-    fromWeb = hits.length > 0;
+    // Keep only pages that could actually contain reported questions.
+    const useful = hits.filter(isUsefulHit);
+    fromWeb = useful.length > 0;
     console.log(
-      `[webResearch] ${hits.length} hit(s) for "${roleHint}" — ` +
-        hits.map((h) => h.site).slice(0, 4).join(", ")
+      `[webResearch] ${hits.length} hit(s), ${useful.length} usable for "${roleHint}"` +
+        (useful.length ? ` — ${useful.map((h) => h.site).slice(0, 4).join(", ")}` : " — no usable pages")
     );
+    hits = useful;
   } catch (err: any) {
     console.warn("[webResearch] Search failed:", err?.message);
+  }
+
+  // No real source material: return nothing rather than inventing "market"
+  // questions. An empty result makes the generator reallocate those slots to
+  // JD-grounded technical questions, which is honest and produces better
+  // interviews than a hallucinated forum question.
+  if (!hits.length) {
+    console.warn(
+      `[webResearch] no usable sources for "${roleHint}" — market questions will be replaced by technical ones`
+    );
+    return { roleHint, queries, hits: [], suggested: [], fromWeb: false };
   }
 
   const suggested = await extractQuestions({
@@ -313,6 +383,6 @@ Suggested market questions (use or closely adapt):
 ${qLines}
 
 Raw search snippets for context:
-${hitLines || "(search returned no snippets — still include market questions from the suggestions above)"}
+${hitLines}
 `;
 }
