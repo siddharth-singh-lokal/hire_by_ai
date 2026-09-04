@@ -2,7 +2,7 @@ import { evaluateInterview, evaluateGeneric } from "./evaluate";
 import { loadContextPack } from "./questionBank";
 import { getSession, updateSession } from "./sessionStore";
 import { LANGUAGES } from "./languages";
-import { translateTranscriptToEnglish } from "./translate";
+import { sessionNeedsEnglishTranslation, translateTranscriptToEnglish } from "./translate";
 
 function languageLabel(code?: string): string {
   return (code && LANGUAGES[code as keyof typeof LANGUAGES]?.label) || "English";
@@ -53,10 +53,9 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
   const started = Date.now();
 
   try {
-    // A non-English screen is translated to English (original kept) so the
-    // recruiter can read it. Best-effort and off the live path — do it here,
-    // once, before grading. Grading itself works in the original language.
-    if (session.language && session.language !== "en") {
+    // Non-English screens, and English screens where the candidate spoke Hindi,
+    // are translated to English (original kept) so the recruiter can read them.
+    if (sessionNeedsEnglishTranslation(session.transcripts, session.language)) {
       const translated = await translateTranscriptToEnglish(
         session.transcripts,
         languageLabel(session.language)
@@ -64,17 +63,18 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
       updateSession(sessionId, { transcripts: translated });
     }
 
+    const graded = getSession(sessionId)!;
     const evaluation = await evaluateInterview({
-      bank: session.bank,
-      candidateName: session.candidateName,
-      transcripts: session.transcripts,
+      bank: graded.bank,
+      candidateName: graded.candidateName,
+      transcripts: graded.transcripts,
       durationSeconds:
-        session.durationSeconds ||
-        Math.round(((session.completedAt || Date.now()) - (session.startedAt || Date.now())) / 1000),
-      redFlags: session.redFlags,
+        graded.durationSeconds ||
+        Math.round(((graded.completedAt || Date.now()) - (graded.startedAt || Date.now())) / 1000),
+      redFlags: graded.redFlags,
       orgGrounded: loadContextPack() !== null,
-      streamDrops: session.streamDrops || 0,
-      interviewLanguage: languageLabel(session.language),
+      streamDrops: graded.streamDrops || 0,
+      interviewLanguage: languageLabel(graded.language),
     });
 
     // The counterfactual runs alongside but must never block the real result.

@@ -346,7 +346,6 @@ app.get("/api/admin/sessions", (req: Request, res: Response) => {
       createdAt: s.createdAt,
       terminationReason: s.terminationReason,
       verdict: s.scorecard?.verdict,
-      overallScore: s.scorecard?.overallScore,
       transcriptCount: s.transcripts.length,
       gradingError: s.gradingError,
       streamDrops: s.streamDrops || 0,
@@ -401,7 +400,6 @@ app.get("/api/admin/shortlist", (req: Request, res: Response) => {
       status: s.status,
       durationSeconds: s.durationSeconds,
       verdict: sc?.verdict,
-      overallScore: sc?.overallScore,
       summary: sc?.summary,
       // The one line a recruiter reads if they read nothing else.
       recommendationReason: sc?.recommendationReason,
@@ -419,6 +417,7 @@ app.get("/api/admin/shortlist", (req: Request, res: Response) => {
       screenQuality: sc?.screenQuality,
       rescreenRecommended: sc?.rescreenRecommended,
       graded: Boolean(sc),
+      createdAt: s.createdAt,
     };
     const list = byRole.get(s.role) || [];
     list.push(row);
@@ -433,7 +432,7 @@ app.get("/api/admin/shortlist", (req: Request, res: Response) => {
         const ra = VERDICT_RANK[a.verdict] ?? 9;
         const rb = VERDICT_RANK[b.verdict] ?? 9;
         if (ra !== rb) return ra - rb;
-        return (b.overallScore || 0) - (a.overallScore || 0);
+        return b.createdAt - a.createdAt;
       });
       return {
         role,

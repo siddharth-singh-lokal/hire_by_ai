@@ -3,10 +3,11 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Server } from "http";
 import { InvokeModelWithBidirectionalStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { sonicClient, SONIC_MODEL_ID } from "./bedrock";
-import { getSession, updateSession, appendTranscript, recordStreamDrop } from "./sessionStore";
+import { getSession, updateSession, appendTranscript, patchTranscriptEnglish, recordStreamDrop } from "./sessionStore";
 import { gradeSession } from "./grading";
 import { renderInterviewerPrompt } from "./questionBank";
 import { resolveLanguage } from "./languages";
+import { shouldTranslateToEnglish, translateLineToEnglish } from "./translate";
 
 /**
  * Nova Sonic relay.
@@ -211,7 +212,28 @@ const RECOVERABLE =
 const MAX_STREAM_ATTEMPTS = 5;
 
 /** How much recent conversation a resumed stream is shown. */
-const RESUME_TAIL_LINES = 12;
+const RESUME_TAIL_LINES = 18;
+
+/** Brief check-ins that are not real interview questions — skip when resuming. */
+function isPingTurn(text: string): boolean {
+  const t = text.trim();
+  if (!t || /reconnecting/i.test(t)) return true;
+  if (/^(hey|hi|hello|are you (still )?there|still (there|with me)|can you hear|you there)/i.test(t)) {
+    return true;
+  }
+  // Very short lines with no question mark are usually silence check-ins.
+  return t.length < 30 && !t.includes("?");
+}
+
+function lastSubstantiveInterviewerTurn(
+  transcripts: { sender: string; text: string }[]
+): string | undefined {
+  for (let i = transcripts.length - 1; i >= 0; i--) {
+    const line = transcripts[i];
+    if (line.sender === "interviewer" && !isPingTurn(line.text)) return line.text;
+  }
+  return undefined;
+}
 
 /**
  * Delay between the stream ending and grading starting, so the browser's
@@ -364,6 +386,25 @@ export function attachNovaSonicRelay(server: Server): void {
           injectSystemNote(
             session,
             `SYSTEM NOTE — do not read this aloud verbatim. You are now at time. Do NOT start any new topics or questions. Let the candidate finish whatever they are currently saying, then begin winding the conversation down naturally. Keep your turns short.`
+          );
+          break;
+        }
+
+        // Long silence after a question — anchor the model so it does not
+        // re-greet or jump back to an earlier question from the list.
+        case "continuity_nudge": {
+          if (!session.ready || session.closed) return;
+          const fresh = getSession(prepared.id);
+          const lastQ =
+            fresh?.lastQuestionAsked ||
+            lastSubstantiveInterviewerTurn(fresh?.transcripts ?? prepared.transcripts);
+          if (!lastQ) return;
+          injectSystemNote(
+            session,
+            `SYSTEM NOTE — do not read this aloud verbatim. The candidate has been quiet while thinking. ` +
+              `Do NOT say hello, hey, or re-introduce yourself. Do NOT return to earlier questions they already answered. ` +
+              `Your last question, which is still open, was: "${lastQ.slice(0, 500)}". ` +
+              `Either stay silent a little longer or repeat ONLY that question in one short sentence, then listen.`
           );
           break;
         }
@@ -551,21 +592,33 @@ export function attachNovaSonicRelay(server: Server): void {
      * done and she skipped straight to a scenario she had never asked.
      */
     const buildResumeNote = (): string => {
+      const fresh = getSession(prepared.id) ?? prepared;
       const name = prepared.candidateName;
-      const tail = prepared.transcripts
+      const transcripts = fresh.transcripts;
+      const lastQ =
+        fresh.lastQuestionAsked || lastSubstantiveInterviewerTurn(transcripts);
+      const lastLine = transcripts[transcripts.length - 1];
+      const waitingForAnswer = lastLine?.sender === "interviewer";
+      const tail = transcripts
         .slice(-RESUME_TAIL_LINES)
         .map((t) => `${t.sender === "candidate" ? name : "You"}: ${t.text}`)
         .join("\n");
       return (
-        `The call dropped and has just been restored. You are MID-INTERVIEW. ` +
-        `Do NOT greet ${name} again, do NOT reintroduce yourself, and do NOT start from the first question.\n\n` +
+        `The call dropped and has just been restored. You are MID-INTERVIEW.\n\n` +
+        `FORBIDDEN: greeting ${name} again, saying "hey" or "hello", re-introducing yourself, ` +
+        `or asking any question that already appears answered in the transcript below.\n\n` +
+        (lastQ
+          ? `CONTINUE FROM YOUR LAST QUESTION (do NOT go back to earlier ones):\n"${lastQ}"\n\n` +
+            (waitingForAnswer
+              ? `${name} had not answered yet when we dropped — they may have been thinking. ` +
+                `Repeat that question briefly in one sentence, then listen.\n\n`
+              : `${name}'s last answer is in the transcript below — respond to it, ` +
+                `then ask the NEXT question from your list, not an earlier one.\n\n`)
+          : "") +
         (tail
-          ? `The end of the conversation so far, verbatim:\n${tail}\n\n`
-          : `You had only just said hello; nothing has been asked yet.\n\n`) +
-        `When ${name} next speaks, say one short line acknowledging the drop ("sorry, we lost the connection for a moment"), ` +
-        `then pick up exactly where this left off: if a question was asked and not yet answered, ask it again briefly; ` +
-        `otherwise move to the next question in your list that does not appear above. ` +
-        `Any question not visible above has NOT been asked yet.`
+          ? `Recent conversation, verbatim:\n${tail}\n\n`
+          : `You had only just opened; nothing substantive has been asked yet.\n\n`) +
+        `Any question fully answered above is DONE. Questions not visible above have NOT been asked yet.`
       );
     };
 
@@ -582,6 +635,21 @@ export function attachNovaSonicRelay(server: Server): void {
         );
 
         send({ type: "ready" });
+
+        // Nova Sonic waits for a USER turn before the assistant speaks. On a fresh
+        // call the candidate is silently waiting — nudge the interviewer to greet
+        // first without faking a candidate line in the transcript.
+        if (!resumeNote && !prepared.transcripts.some((t) => t.sender === "interviewer")) {
+          setTimeout(() => {
+            if (session.closed || !session.ready || ws.readyState !== WebSocket.OPEN) return;
+            injectSystemNote(
+              session,
+              `[The candidate has joined and is waiting on the line. YOU speak first: ` +
+                `deliver your opening greeting now, then ask your first question. ` +
+                `Do not wait for them to say hello — they are expecting you to start.]`
+            );
+          }, 800);
+        }
 
         // Replay whatever the candidate said while we were reconnecting.
         if (pendingAudio.length) {
@@ -633,6 +701,21 @@ export function attachNovaSonicRelay(server: Server): void {
 
               // Persist server-side so the result survives the browser closing.
               appendTranscript(prepared.id, { sender, text, timestamp: Date.now() });
+
+              if (sender === "interviewer" && !isPingTurn(text)) {
+                updateSession(prepared.id, { lastQuestionAsked: text });
+              }
+
+              // Sonic ASR follows the spoken language — Hindi answers land in
+              // Devanagari even on an English interview. Translate async so the
+              // live transcript can show English without blocking audio.
+              if (shouldTranslateToEnglish(text, lang.code)) {
+                void translateLineToEnglish(text, lang.label).then((textEn) => {
+                  if (!textEn || textEn === text) return;
+                  patchTranscriptEnglish(prepared.id, text, textEn);
+                  send({ type: "transcript_en", text, textEn });
+                });
+              }
 
               // A real candidate turn proves this stream works: reset the
               // consecutive-failure budget so a flaky call is not killed on its

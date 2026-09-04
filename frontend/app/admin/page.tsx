@@ -288,10 +288,9 @@ export default function AdminPage() {
             <div>
               <h2 className="text-base font-bold">Shortlist</h2>
               <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
-                Every screened candidate for a role, ordered by what to do next
-                rather than by score — an &ldquo;advance with focus&rdquo; at 62 comes before a
-                &ldquo;needs discussion&rdquo; at 68. The chips show which of the role&apos;s stated
-                requirements the conversation actually established.
+                Every screened candidate for a role, ordered by advancement recommendation.
+                The chips show which of the role&apos;s stated requirements the conversation
+                actually established.
               </p>
             </div>
 
@@ -409,9 +408,11 @@ export default function AdminPage() {
                               <p className="text-[11px] font-semibold text-slate-200">
                                 {c.verdict}
                               </p>
-                              <p className="text-[10px] text-slate-500">
-                                {c.overallScore}/100 · {c.evidenced}/{c.requirementCount} met
-                              </p>
+                              {c.requirementCount > 0 && (
+                                <p className="text-[10px] text-slate-500">
+                                  {c.evidenced}/{c.requirementCount} requirements met
+                                </p>
+                              )}
                             </>
                           ) : (
                             <p className="text-[10px] text-slate-600">—</p>
@@ -916,18 +917,20 @@ export default function AdminPage() {
                       {s.verdict ? (
                         <>
                           <p className="text-[11px] font-semibold text-slate-200">{s.verdict}</p>
-                          <p className="text-[10px] text-slate-500">
-                            {s.overallScore}/100
-                            {s.rescreenRecommended ? (
-                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 font-semibold">
-                                re-screen
-                              </span>
-                            ) : s.screenQuality && s.screenQuality !== "clean" ? (
-                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 font-semibold">
-                                {s.streamDrops} drop{s.streamDrops === 1 ? "" : "s"}
-                              </span>
-                            ) : null}
-                          </p>
+                          {(s.rescreenRecommended ||
+                            (s.screenQuality && s.screenQuality !== "clean")) && (
+                            <p className="text-[10px] text-slate-500">
+                              {s.rescreenRecommended ? (
+                                <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 font-semibold">
+                                  re-screen
+                                </span>
+                              ) : s.screenQuality && s.screenQuality !== "clean" ? (
+                                <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 font-semibold">
+                                  {s.streamDrops} drop{s.streamDrops === 1 ? "" : "s"}
+                                </span>
+                              ) : null}
+                            </p>
+                          )}
                         </>
                       ) : s.gradingError ? (
                         <p className="text-[10px] text-rose-400">grading failed</p>

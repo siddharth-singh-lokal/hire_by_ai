@@ -26,6 +26,8 @@ export interface TranscriptItem {
   id: string;
   sender: "candidate" | "interviewer";
   text: string;
+  /** English gloss when the spoken line was in Hindi/Hinglish/etc. */
+  textEn?: string;
   timestamp: number;
   isFinal: boolean;
 }
@@ -193,6 +195,9 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
   const noReconnectRef = useRef(false);
   const wsAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Nudges the relay after long silence so the interviewer stays on the last question. */
+  const silenceNudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceNudgeSentRef = useRef(false);
   const startInterviewRef = useRef<(() => Promise<void>) | null>(null);
 
   /** Decays the user's meter so it falls smoothly instead of snapping to zero. */
@@ -222,6 +227,11 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    if (silenceNudgeTimerRef.current) {
+      clearTimeout(silenceNudgeTimerRef.current);
+      silenceNudgeTimerRef.current = null;
+    }
+    silenceNudgeSentRef.current = false;
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "stop" }));
@@ -275,6 +285,26 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
       startInterviewRef.current?.();
     }, delay);
   }, []);
+
+  const clearSilenceNudge = useCallback(() => {
+    if (silenceNudgeTimerRef.current) {
+      clearTimeout(silenceNudgeTimerRef.current);
+      silenceNudgeTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleSilenceNudge = useCallback(() => {
+    clearSilenceNudge();
+    silenceNudgeSentRef.current = false;
+    silenceNudgeTimerRef.current = setTimeout(() => {
+      silenceNudgeTimerRef.current = null;
+      if (silenceNudgeSentRef.current || intentionalCloseRef.current || closingRef.current) return;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        silenceNudgeSentRef.current = true;
+        wsRef.current.send(JSON.stringify({ type: "continuity_nudge" }));
+      }
+    }, 20000);
+  }, [clearSilenceNudge]);
 
   const appendTranscript = useCallback(
     (sender: "candidate" | "interviewer", text: string) => {
@@ -366,6 +396,27 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
 
           case "transcript":
             appendTranscript(msg.sender, msg.text);
+            if (msg.sender === "interviewer") {
+              scheduleSilenceNudge();
+            } else if (msg.sender === "candidate") {
+              clearSilenceNudge();
+              silenceNudgeSentRef.current = false;
+            }
+            break;
+
+          case "transcript_en":
+            if (msg.text && msg.textEn) {
+              setTranscripts((prev) => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  if (prev[i].text === msg.text && !prev[i].textEn) {
+                    const next = [...prev];
+                    next[i] = { ...next[i], textEn: msg.textEn };
+                    return next;
+                  }
+                }
+                return prev;
+              });
+            }
             break;
 
           case "end_requested":
@@ -377,6 +428,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
             break;
 
           case "reconnecting":
+            clearSilenceNudge();
             // Bedrock dropped the stream (NGHTTP2_INTERNAL_ERROR /
             // ModelStreamErrorException are both common). The relay is starting
             // a fresh one; discard half-played audio so the resumed turn does
@@ -611,7 +663,7 @@ export function useNovaSonicInterview(sessionId?: string | null): UseNovaSonicIn
         scheduleReconnect();
       }
     }
-  }, [appendTranscript, cleanup, sessionId, scheduleReconnect]);
+  }, [appendTranscript, cleanup, sessionId, scheduleReconnect, scheduleSilenceNudge, clearSilenceNudge]);
 
   // Keep a ref so the reconnect timer can invoke the latest startInterview.
   useEffect(() => {

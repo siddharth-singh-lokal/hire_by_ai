@@ -1,27 +1,13 @@
 import { EVALUATION_MODEL_ID, AWS_REGION } from "./bedrock";
 import { callJson } from "./llm";
 import { QuestionBank } from "./questionBank";
-import { GroundedScorecard } from "./scorecardTypes";
-
-/**
- * Grades a completed interview against the rubric its question bank generated.
- *
- * Two design commitments show up in the prompt:
- *
- *  1. EVIDENCE OVER SCORES. A hiring manager will not trust "7.4/10", but they
- *     will trust ninety seconds of transcript. Every score must cite verbatim
- *     quotes; a score without evidence is treated as a failure of the grader,
- *     not a fact about the candidate.
- *
- *  2. THE R1 BRIEFING IS THE POINT. The output that actually saves engineer
- *     hours is "skip this, probe that, open with this" — it makes the human
- *     round shorter AND better. Everything else is supporting material.
- */
+import { GroundedScorecard, EvidenceMoment } from "./scorecardTypes";
+import { StoredTranscript } from "./sessionStore";
 
 interface EvaluateInput {
   bank: QuestionBank;
   candidateName: string;
-  transcripts: { sender: string; text: string; timestamp?: number }[];
+  transcripts: StoredTranscript[];
   durationSeconds: number;
   redFlags: { type: string; description: string; timeInSeconds: number }[];
   orgGrounded: boolean;
@@ -70,8 +56,9 @@ HOW TO SCORE — read this carefully, it is where graders go wrong
 - **A skill they did not list but clearly have is a PLUS.** Resumes undersell constantly. Credit demonstrated ability regardless of whether it was claimed.
 - **A skill the role needs that they lack is only a concern if it is needed on day one.** Things people learn on the job are not screening failures — say "would need to pick up X" rather than penalising.
 - **Judge against the ${bank.seniority} bar**, not against engineers in general. Do not apply staff-level expectations to a mid-level screen.
-${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** The transcript is in that language. Assess the CONTENT of the answers exactly as you would in English — depth, ownership, reasoning — and never treat the choice of language, or code-switching with English, as a weakness. Quote evidence verbatim in the original script and add a short English gloss in parentheses in your justification so a non-speaker can follow.
+${input.interviewLanguage && input.interviewLanguage !== "English" ? `- **This interview was conducted in ${input.interviewLanguage}.** Assess the CONTENT of the answers exactly as you would in English — depth, ownership, reasoning — and never treat the choice of language, or code-switching with English, as a weakness. The transcript below is in English for readability. Quote candidate speech in **English** in every evidence field.
 ` : ""}- **The transcript is machine-transcribed speech, not writing.** Fillers ("uh", "i mean"), missing punctuation, a sentence split across several lines, and odd word choices are transcription and nerves, not the candidate's communication ability. Judge Communication on whether the IDEAS came through and built on each other, never on polish. Answers in Hindi or Hinglish are fully valid — assess the content exactly as you would in English, and never treat language mixing as a weakness.
+- **Silence before the interviewer opened does not count against Communication.** If the first lines in the transcript are only from the interviewer, the candidate was waiting to be greeted — score Communication from their answers once the conversation was actually underway, not from pre-greeting silence.
 
 WHAT WE ARE ACTUALLY HIRING FOR — read this before you score anything
 We are hiring problem solvers, not people who memorised answers. That distinction decides how you grade:
@@ -131,7 +118,7 @@ Separately from proctoring, judge whether the answers sound like this person's o
 RULES
 - Any axis you score ABOVE OR BELOW 3 needs at least one VERBATIM quote from the candidate. If you cannot quote them, the honest score is 3 and the justification says the topic was not established.
 - Never invent quotes. If the transcript is thin, say so plainly — "not established in this screen" is a legitimate and useful finding, and far more useful than a confident score with nothing behind it.
-- evidenceMoments: pick the 3-6 moments that would most change a hiring manager's mind, positive or negative. Use the timestamp in seconds from the transcript.
+- evidenceMoments: pick the 3-6 moments that would most change a hiring manager's mind, positive or negative. Use the timestamp in seconds from the transcript. The "quote" field must be in English.
 - gapMatrix: one row per JD requirement, stating what the interview actually established.
 - r1Briefing.skip: only topics genuinely nailed. Getting this wrong wastes the engineer's hour, which is the entire thing we are trying to save.
 - r1Briefing.probe: weak, dodged, or uncovered — with a concrete question R1 should ask.
@@ -175,6 +162,93 @@ Return ONLY a JSON object. No comments, no trailing commas, no prose around it:
 "overallScore" is confidence that this candidate is worth the next round — NOT a quality grade and NOT a hire probability. A well-covered, solid screen sits around 70-80. Reserve below 40 for genuine mismatches, not for interviews that simply ran short.`;
 }
 
+/** Recruiter-facing line: English translation when the original was in another script. */
+function displayLine(t: StoredTranscript): string {
+  return t.textEn?.trim() || t.text;
+}
+
+function transcriptLineAt(
+  transcripts: StoredTranscript[],
+  timeInSeconds: number,
+  speaker: "candidate" | "interviewer",
+  start: number
+): StoredTranscript | undefined {
+  let best: StoredTranscript | undefined;
+  let bestDist = Infinity;
+  for (const t of transcripts) {
+    if (t.sender !== speaker) continue;
+    const at = t.timestamp ? Math.max(0, Math.round((t.timestamp - start) / 1000)) : 0;
+    const d = Math.abs(at - timeInSeconds);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return bestDist <= 6 ? best : undefined;
+}
+
+/** Maps a grader quote to the English transcript line when available. */
+export function englishQuote(
+  quote: string,
+  transcripts: StoredTranscript[],
+  opts?: { speaker?: "candidate" | "interviewer"; timeInSeconds?: number }
+): string {
+  if (!quote?.trim() || !transcripts.length) return quote;
+  const start = transcripts[0]?.timestamp ?? 0;
+
+  if (opts?.timeInSeconds != null && opts.speaker) {
+    const line = transcriptLineAt(transcripts, opts.timeInSeconds, opts.speaker, start);
+    if (line?.textEn?.trim()) return line.textEn.trim();
+    if (line && quote.trim().length > 10 && line.text.includes(quote.trim().slice(0, 20))) {
+      return displayLine(line);
+    }
+  }
+
+  const needle = quote.trim().slice(0, Math.min(quote.trim().length, 40));
+  for (const t of transcripts) {
+    if (opts?.speaker && t.sender !== opts.speaker) continue;
+    if (t.text.includes(needle) || needle.includes(t.text.trim().slice(0, 20))) {
+      if (t.textEn?.trim()) return t.textEn.trim();
+    }
+  }
+
+  return quote;
+}
+
+function applyEnglishQuotes(
+  parsed: any,
+  transcripts: StoredTranscript[]
+): { evidenceMoments: EvidenceMoment[]; [key: string]: any } {
+  const evidenceMoments = (parsed.evidenceMoments || []).map((m: EvidenceMoment) => ({
+    ...m,
+    quote: englishQuote(m.quote, transcripts, {
+      speaker: m.speaker,
+      timeInSeconds: m.timeInSeconds,
+    }),
+  }));
+
+  const axisScores = (parsed.axisScores || []).map((a: any) => ({
+    ...a,
+    evidence: (a.evidence || []).map((q: string) => englishQuote(q, transcripts, { speaker: "candidate" })),
+  }));
+
+  const keyStrengths = (parsed.keyStrengths || []).map((s: any) => ({
+    ...s,
+    evidenceQuote: s.evidenceQuote
+      ? englishQuote(s.evidenceQuote, transcripts, { speaker: "candidate" })
+      : s.evidenceQuote,
+  }));
+
+  const redFlags = (parsed.redFlags || []).map((f: any) => ({
+    ...f,
+    evidenceQuote: f.evidenceQuote
+      ? englishQuote(f.evidenceQuote, transcripts, { speaker: "candidate" })
+      : f.evidenceQuote,
+  }));
+
+  return { ...parsed, evidenceMoments, axisScores, keyStrengths, redFlags };
+}
+
 export async function evaluateInterview(input: EvaluateInput): Promise<GroundedScorecard> {
   // Relative timestamps let the scorecard link a quote to a point in the recording.
   const start = input.transcripts[0]?.timestamp ?? 0;
@@ -182,7 +256,7 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
     .map((t) => {
       const at = t.timestamp ? Math.max(0, Math.round((t.timestamp - start) / 1000)) : 0;
       const who = t.sender === "candidate" ? input.candidateName : "Interviewer";
-      return `[${at}s] ${who}: ${t.text}`;
+      return `[${at}s] ${who}: ${displayLine(t)}`;
     })
     .join("\n");
 
@@ -244,8 +318,10 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
       "Too little of the interview was usable to judge fairly — the conversation was very short or disrupted. Re-screen on a stable connection before any decision.";
   }
 
+  const localized = applyEnglishQuotes(parsed, input.transcripts);
+
   return {
-    ...parsed,
+    ...localized,
     verdict,
     overallScore,
     recommendationReason,
@@ -256,8 +332,8 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
     candidateName: input.candidateName,
     role: input.bank.role,
     seniority: input.bank.seniority,
-    axisScores: parsed.axisScores || [],
-    evidenceMoments: parsed.evidenceMoments || [],
+    axisScores: localized.axisScores || [],
+    evidenceMoments: localized.evidenceMoments || [],
     gapMatrix: parsed.gapMatrix || [],
     r1Briefing: parsed.r1Briefing || { skip: [], probe: [], suggestedOpener: "" },
     orgGrounded: input.orgGrounded,

@@ -669,8 +669,13 @@ function InterviewRoom() {
                     {t.sender === "candidate" ? "You" : "Interviewer"}
                   </p>
                   <p className="text-xs text-slate-300 leading-relaxed break-words">
-                    {t.text}
+                    {t.textEn || t.text}
                   </p>
+                  {t.textEn && t.textEn !== t.text && (
+                    <p className="text-[11px] text-slate-500 leading-relaxed mt-0.5 italic break-words">
+                      {t.text}
+                    </p>
+                  )}
                 </div>
               ))
             )}

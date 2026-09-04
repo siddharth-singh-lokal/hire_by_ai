@@ -11,7 +11,6 @@ import {
   MinusCircle,
   Quote,
   Target,
-  ShieldCheck,
   Scale,
   ClipboardList,
   RotateCcw,
@@ -19,14 +18,8 @@ import {
 import { useSearchParams } from "next/navigation";
 import { IntegrityAuditPanel } from "@/components/IntegrityAuditPanel";
 import { fetchScorecard, regradeInterview, recordingUrl, BACKEND_URL } from "@/lib/api";
+import { englishQuote } from "@/lib/englishQuote";
 import type { RedFlag } from "@/lib/sessionStore";
-
-const VERDICT_STYLE: Record<string, string> = {
-  Advance: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
-  "Advance with focus": "bg-teal-500/15 text-teal-300 border-teal-500/40",
-  "Needs discussion": "bg-amber-500/15 text-amber-300 border-amber-500/40",
-  "Do not advance": "bg-rose-500/15 text-rose-300 border-rose-500/40",
-};
 
 const GAP_STYLE: Record<string, { icon: React.ReactNode; className: string }> = {
   evidenced: {
@@ -195,22 +188,6 @@ function Scorecard() {
               </p>
             </div>
           </div>
-
-          <div className="flex items-center gap-3 shrink-0">
-            {evaluation.orgGrounded && (
-              <span className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                <ShieldCheck className="w-3 h-3" />
-                Org-grounded
-              </span>
-            )}
-            <span
-              className={`px-3 py-1.5 rounded-full text-xs font-bold border ${
-                VERDICT_STYLE[evaluation.verdict] || VERDICT_STYLE["Needs discussion"]
-              }`}
-            >
-              {evaluation.verdict} · {evaluation.overallScore}
-            </span>
-          </div>
         </div>
       </header>
 
@@ -332,7 +309,12 @@ function Scorecard() {
                   {(evaluation.evidenceMoments || []).length === 0 && (
                     <p className="text-xs text-slate-500">No evidence moments recorded.</p>
                   )}
-                  {(evaluation.evidenceMoments || []).map((m: any, i: number) => (
+                  {(evaluation.evidenceMoments || []).map((m: any, i: number) => {
+                    const quoteEn = englishQuote(m.quote, transcripts, {
+                      speaker: m.speaker,
+                      timeInSeconds: m.timeInSeconds,
+                    });
+                    return (
                     <div
                       key={i}
                       className={`p-3 rounded-xl border ${
@@ -351,13 +333,19 @@ function Scorecard() {
                       </div>
                       <p className="text-xs text-slate-200 leading-relaxed flex gap-2">
                         <Quote className="w-3 h-3 shrink-0 mt-1 text-slate-600" />
-                        <span className="italic">{m.quote}</span>
+                        <span className="italic">{quoteEn}</span>
                       </p>
+                      {quoteEn !== m.quote && (
+                        <p className="mt-1.5 pl-5 text-[11px] text-slate-500 italic leading-relaxed">
+                          {m.quote}
+                        </p>
+                      )}
                       <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
                         {m.significance}
                       </p>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -492,17 +480,13 @@ function Scorecard() {
                 Sanity-check baseline · not the decision
               </p>
               <p className="text-[11px] text-slate-500 leading-relaxed">
-                Scored with a generic rubric that knows nothing about this role, the same
-                transcript reads as{" "}
-                <span className="text-slate-400 font-medium">
-                  {generic.verdict} ({generic.overallScore}/100)
-                </span>
-                . The verdict to trust is{" "}
-                <span className="text-slate-300 font-medium">
-                  {evaluation.verdict} ({evaluation.overallScore}/100)
-                </span>{" "}
-                — the one calibrated to this JD. The gap is the value the org grounding adds; it
-                is not a second opinion to average in.
+                A generic rubric that knows nothing about this role would read this transcript
+                as{" "}
+                <span className="text-slate-400 font-medium">{generic.verdict}</span>. The
+                verdict to trust is{" "}
+                <span className="text-slate-300 font-medium">{evaluation.verdict}</span> — the
+                one calibrated to this JD. The gap is the value the org grounding adds; it is not
+                a second opinion to average in.
               </p>
             </section>
           )}
@@ -513,7 +497,7 @@ function Scorecard() {
           />
 
           <p className="text-[10px] text-slate-600 leading-relaxed px-1">
-            Evidence for a human decision — not a hiring decision. Scored by{" "}
+            Evidence for a human decision — not a hiring decision. Assessed by{" "}
             {evaluation.modelUsed || "Amazon Bedrock"} against {BACKEND_URL.replace(/^https?:\/\//, "")}.
           </p>
         </aside>

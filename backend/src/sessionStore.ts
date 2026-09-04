@@ -80,6 +80,8 @@ export interface InterviewSession {
   durationSeconds: number;
   /** Populated after grading, so the admin list can show outcomes. */
   scorecard?: GroundedScorecard;
+  /** Last substantive question asked — anchors resume after drops or long silence. */
+  lastQuestionAsked?: string;
   /** Set if grading itself failed, so the admin sees why rather than nothing. */
   gradingError?: string;
   /** Why the interview ended early, when it did. */
@@ -314,6 +316,20 @@ export function appendTranscript(id: string, line: StoredTranscript): void {
 
   session.transcripts.push(line);
   persist();
+}
+
+/** Attaches an English gloss to a line already stored (live translation path). */
+export function patchTranscriptEnglish(id: string, text: string, textEn: string): void {
+  const session = sessions.get(id);
+  if (!session || !textEn.trim()) return;
+  for (let i = session.transcripts.length - 1; i >= 0; i--) {
+    const line = session.transcripts[i];
+    if (line.text === text && !line.textEn) {
+      line.textEn = textEn.trim();
+      persist();
+      return;
+    }
+  }
 }
 
 export function updateSession(id: string, patch: Partial<InterviewSession>): void {
