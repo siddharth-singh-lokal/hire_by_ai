@@ -70,7 +70,7 @@ export default function CandidateSignInPage() {
                   setEmail(e.target.value);
                   if (error) setError(null);
                 }}
-                placeholder="you@example.com"
+                placeholder="alex@gmail.com"
                 className="w-full rounded-xl bg-slate-900/60 border border-slate-800 focus:border-indigo-600 focus:outline-none px-3 py-2.5 text-sm placeholder:text-slate-600"
               />
             </div>

@@ -128,6 +128,8 @@ export interface QuestionBank {
   claimsToVerify: { claim: string; jdRequirement: string }[];
   /** Requirements with no supporting resume evidence — the interview must probe these. */
   unevidencedRequirements: string[];
+  /** Résumé-vs-JD requirement coverage — also surfaced fast via /api/ats-score while generating. */
+  jdCoverage: { requirement: string; status: "evidenced" | "partial" | "missing"; evidence: string }[];
   openingLine: string;
   /**
    * Discipline inferred from the JD. Kept on the bank so the live interviewer
@@ -139,14 +141,18 @@ export interface QuestionBank {
 }
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
+// Org "scenario" questions were removed by product decision — interviews now use
+// only resume_probe (verify what they actually did) and jd_gap (probe stated
+// requirements the resume doesn't evidence). The former scenario slots were
+// redistributed into these two so interviews stay just as substantive.
 const DURATION_PLAN: Record<InterviewDuration, { projects: number; scenarios: number; gaps: number }> = {
   // 1 is a smoke-test length for checking the flow end to end: a single probe.
   1: { projects: 1, scenarios: 0, gaps: 0 },
-  // 5 is a demo/taster length: one claim to verify, one problem to reason about.
-  5: { projects: 1, scenarios: 1, gaps: 0 },
-  15: { projects: 1, scenarios: 1, gaps: 1 },
-  30: { projects: 2, scenarios: 2, gaps: 1 },
-  45: { projects: 2, scenarios: 3, gaps: 2 },
+  // 5 is a demo/taster length: one claim to verify plus one gap probe.
+  5: { projects: 1, scenarios: 0, gaps: 1 },
+  15: { projects: 2, scenarios: 0, gaps: 1 },
+  30: { projects: 3, scenarios: 0, gaps: 2 },
+  45: { projects: 4, scenarios: 0, gaps: 2 },
 };
 
 export function loadContextPack(): ContextPack | null {
@@ -222,8 +228,23 @@ function buildSystemPrompt(
       })
     : [];
 
-  const packSection =
-    pack && relevant.length
+  // Org "scenario" questions are disabled (plan.scenarios === 0 for every
+  // duration). When off, the pack's company profile + stack are still handed to
+  // the model as BACKGROUND — for tone and to keep resume/gap questions grounded
+  // in this company's reality — but the scenario list and "build a scenario
+  // question" machinery are dropped entirely so none are generated.
+  const useScenarios = plan.scenarios > 0;
+
+  const packSection = !useScenarios
+    ? pack
+      ? `
+ORG CONTEXT (BACKGROUND ONLY — use for tone and to keep your questions grounded in this company's reality. NEVER quiz the candidate on any of it, and do NOT turn it into a hypothetical "imagine you're supporting…" question).
+${pack.companyProfile ? `\nCOMPANY PROFILE (public-safe):\n${pack.companyProfile}\n` : ""}
+Engineering stack (background; reference only where genuinely relevant to a ${discipline} role):
+${JSON.stringify(pack.stackProfile, null, 2)}
+`
+      : ""
+    : pack && relevant.length
     ? `
 ORG CONTEXT — the environment this role works in.
 ${pack.companyProfile ? `\nCOMPANY PROFILE (public-safe; use for tone and for judging whether someone's way of working would translate here — never quiz them on it):\n${pack.companyProfile}\n` : ""}
@@ -306,7 +327,12 @@ STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
 Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
 ${packSection}${roleSection}
 
-DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.scenarios} scenario question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
+DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s)${plan.scenarios ? ` and ${plan.scenarios} scenario question(s)` : ""} and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
+${
+    plan.scenarios === 0
+      ? `DO NOT create any "scenario" questions. No hypotheticals, no "imagine you're supporting a system where…" set-ups. Every question must be either a resume_probe (about something on their resume) or a jd_gap (a stated JD requirement the resume does not evidence). Use "resume_probe" and "jd_gap" as the only values for "kind".`
+      : ""
+  }
 
 RUBRIC
 Always include these five fixed axes, so candidates stay comparable across roles:
@@ -320,11 +346,19 @@ WRITE SIGNALS THAT A SCREEN CAN ACTUALLY OBSERVE. strongSignal must describe som
 CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort with ambiguity, context-switching, mentoring, giving hard feedback — turn that into an assessable axis. Do not invent culture criteria the JD does not state. Frame these as "how they work", never as personality. Keep at most one such axis: a screening call gives thin evidence about working style, and over-weighting it produces confident nonsense.
 
 QUESTION DESIGN
-- resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot.
-- scenario: reasoning under realistic constraints, drawn from the org context.
-- jd_gap: cover a stated requirement the resume gives no evidence for.
+- resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot. Use several of these, each on a DIFFERENT project/claim, so the interview covers the breadth of what they've done rather than drilling one thing to death.
+${plan.scenarios ? "- scenario: reasoning under realistic constraints, drawn from the org context.\n" : ""}- jd_gap: cover a stated requirement the resume gives no evidence for — asked as a direct question about their experience with it, NOT as a hypothetical scenario.
 - Every question needs escalations (asked when the answer is strong) and ideally a fallback (a simpler angle if they are struggling).
 - strongAnswer/weakAnswer must be specific enough to grade against later. "Good understanding" is useless; "identifies that the pool must close idle connections before the server does" is gradable.
+
+JD COVERAGE — a resume-vs-JD read the recruiter sees alongside the plan.
+Every JD emphasises different things; do NOT treat the résumé as a keyword checklist. Judge domain fit and whether past work TRANSFERS to this role.
+
+Extract 5-8 material themes (domain/industry, seniority scope, core competencies) — not every JD bullet. For each:
+- "evidenced": clearly demonstrated on the résumé (name the line/claim).
+- "partial": same kind of work in a different stack, company, or sub-domain; adjacent industry; or thinner scope at comparable seniority. Use partial generously — different tooling in the same problem space is partial, not missing.
+- "missing": genuinely no adjacent signal in their work history — not merely an unstated keyword.
+Be fair: absence on a résumé is neutral, something the interview establishes. This is judged from documents only.
 
 Return ONLY a JSON object:
 {
@@ -334,6 +368,7 @@ Return ONLY a JSON object:
   "questions": [{"id","kind","question","intent","axes","escalations","fallback","strongAnswer","weakAnswer","scenarioId","minutes"}],
   "claimsToVerify": [{"claim","jdRequirement"}],
   "unevidencedRequirements": ["..."],
+  "jdCoverage": [{"requirement": "a material requirement from the JD, in plain words", "status": "evidenced|partial|missing", "evidence": "the resume claim that supports it (quote or paraphrase), or a short note on why it is a gap"}],
   "openingLine": "TWO SENTENCES MAXIMUM. Address the candidate ONLY as the literal token {{name}} — never a real name. The name on the resume is often not what the candidate goes by, and the system substitutes the correct one at call time. Greet them and say what the next N minutes hold. Nothing else — no reassurance about trick questions, no explanation of the format, no invitation to think out loud. This is spoken aloud, and every second here is a second the candidate does not get to answer in."
 }`;
 }
@@ -459,9 +494,23 @@ export async function generateQuestionBank(opts: {
     questions: fitBudget(questions, duration),
     claimsToVerify: Array.isArray(parsed.claimsToVerify) ? parsed.claimsToVerify : [],
     unevidencedRequirements: toList(parsed.unevidencedRequirements),
+    jdCoverage: normaliseCoverage(parsed.jdCoverage),
     openingLine: parsed.openingLine || "",
     discipline,
   };
+}
+
+/** Coerces the model's coverage rows into the typed shape, dropping junk. */
+function normaliseCoverage(raw: unknown): QuestionBank["jdCoverage"] {
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set(["evidenced", "partial", "missing"]);
+  return raw
+    .map((r: any) => ({
+      requirement: String(r?.requirement || "").trim(),
+      status: allowed.has(r?.status) ? (r.status as "evidenced" | "partial" | "missing") : "partial",
+      evidence: String(r?.evidence || "").trim(),
+    }))
+    .filter((r) => r.requirement);
 }
 
 /**

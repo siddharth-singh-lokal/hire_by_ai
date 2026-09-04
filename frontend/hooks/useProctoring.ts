@@ -57,6 +57,15 @@ const LOOK_AWAY_RATIO = 0.34;
 const PHONE_CONFIDENCE = 0.55;
 /** COCO classes that count as a handheld device. */
 const PHONE_LABELS = ["cell phone", "mobile phone", "remote"];
+/**
+ * COCO classes that suggest the candidate may be reading answers from notes or a
+ * second screen. Logged for the recruiter (with a snapshot) rather than acted on
+ * live — it is far too easy to trip innocently (a notebook on the desk, a second
+ * monitor) to confront someone over, but worth surfacing for a human to judge.
+ */
+const READING_LABELS = ["book", "laptop"];
+/** Sustained this long before it counts — books and laptops sit still in frame. */
+const READING_SUSTAIN_MS = 3000;
 
 export interface UseProctoringOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -91,6 +100,7 @@ export function useProctoring({
   const detectorRef = useRef<FaceDetector | null>(null);
   const objectDetectorRef = useRef<ObjectDetector | null>(null);
   const phoneSinceRef = useRef<number | null>(null);
+  const readingSinceRef = useRef<number | null>(null);
   const detectCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastFaceRef = useRef(0);
   const lastObjectRef = useRef(0);
@@ -293,6 +303,30 @@ export function useProctoring({
             }
           } else {
             phoneSinceRef.current = null;
+          }
+
+          // Reading material / second screen, sustained. Logged for the recruiter
+          // to judge from the snapshot — never confronted live (a notebook or a
+          // second monitor is innocent far more often than not).
+          const seesReading = (objects.detections || []).some((d) =>
+            (d.categories || []).some(
+              (c) =>
+                READING_LABELS.includes((c.categoryName || "").toLowerCase()) &&
+                (c.score ?? 0) >= PHONE_CONFIDENCE
+            )
+          );
+          if (seesReading) {
+            if (readingSinceRef.current === null) {
+              readingSinceRef.current = now;
+            } else if (now - readingSinceRef.current > READING_SUSTAIN_MS) {
+              raiseFlag(
+                "READING_MATERIAL",
+                "A book, notes, or second screen is visible in the candidate's frame"
+              );
+              readingSinceRef.current = now; // cooldown handles spacing
+            }
+          } else {
+            readingSinceRef.current = null;
           }
         } catch {
           /* transient decode error — ignore this frame */

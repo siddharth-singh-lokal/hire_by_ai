@@ -27,10 +27,12 @@ import {
 import { LANGUAGES, languageLabel } from "@/lib/languages";
 import {
   prepareInterview,
+  fetchAtsScore,
   extractPdfText,
   fetchContextPack,
   listAdminSessions,
   fetchShortlist,
+  type AtsScore,
   type ShortlistRole,
   type QuestionBank,
   type ContextPackSummary,
@@ -145,6 +147,8 @@ export default function AdminPage() {
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bank, setBank] = useState<QuestionBank | null>(null);
+  const [ats, setAts] = useState<AtsScore | null>(null);
+  const [atsLoading, setAtsLoading] = useState(false);
   const [preparedEmail, setPreparedEmail] = useState<string | null>(null);
   const [grounded, setGrounded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -190,6 +194,16 @@ export default function AdminPage() {
     setPreparing(true);
     setError(null);
     setBank(null);
+
+    // ATS match returns in a few seconds and shows while the full plan (which
+    // takes ~a minute) is still generating. Fired in parallel, not awaited.
+    setAts(null);
+    setAtsLoading(true);
+    fetchAtsScore(jdText, resumeText)
+      .then(setAts)
+      .catch(() => setAts(null))
+      .finally(() => setAtsLoading(false));
+
     try {
       const result = await prepareInterview({
         jdText,
@@ -431,7 +445,7 @@ export default function AdminPage() {
                   <input
                     value={candidateName}
                     onChange={(e) => setCandidateName(e.target.value)}
-                    placeholder="Priya Sharma"
+                    placeholder="Alex"
                     className="w-full rounded-xl bg-slate-950/60 border border-slate-800 focus:border-slate-600 focus:outline-none px-3 py-2.5 text-sm placeholder:text-slate-600"
                   />
                 </div>
@@ -445,7 +459,7 @@ export default function AdminPage() {
                     type="email"
                     value={candidateEmail}
                     onChange={(e) => setCandidateEmail(e.target.value)}
-                    placeholder="priya@example.com"
+                    placeholder="alex@gmail.com"
                     className="w-full rounded-xl bg-slate-950/60 border border-slate-800 focus:border-slate-600 focus:outline-none px-3 py-2.5 text-sm placeholder:text-slate-600"
                   />
                   <p className="mt-1.5 text-[10px] text-slate-500">
@@ -561,15 +575,101 @@ export default function AdminPage() {
             </section>
 
             {/* Plan review */}
-            <aside className="lg:sticky lg:top-8">
+            <aside className="lg:sticky lg:top-8 space-y-4">
+              {/* ATS match — appears within a few seconds, while the full plan
+                  below is still generating. */}
+              {(atsLoading || ats) && (
+                <div className="rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden">
+                  {atsLoading && !ats ? (
+                    <div className="p-5 flex items-center gap-3 text-slate-400">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-xs">Scoring résumé against the JD…</span>
+                    </div>
+                  ) : ats ? (
+                    (() => {
+                      const cov = ats.coverage ?? [];
+                      const nEvid = cov.filter((c) => c.status === "evidenced").length;
+                      const nPart = cov.filter((c) => c.status === "partial").length;
+                      const nMiss = cov.filter((c) => c.status === "missing").length;
+                      const tone =
+                        ats.atsScore >= 80
+                          ? { ring: "text-emerald-400", bar: "bg-emerald-500" }
+                          : ats.atsScore >= 60
+                          ? { ring: "text-amber-400", bar: "bg-amber-500" }
+                          : { ring: "text-rose-400", bar: "bg-rose-500" };
+                      return (
+                        <div className="p-5">
+                          <div className="flex items-center gap-4">
+                            <div className="shrink-0 text-center">
+                              <div className={`text-3xl font-extrabold ${tone.ring}`}>{ats.atsScore}</div>
+                              <div className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">ATS score</div>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-semibold text-slate-200">{ats.verdict || "Résumé ↔ JD match"}</p>
+                              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                                <div className={`h-full ${tone.bar}`} style={{ width: `${ats.atsScore}%` }} />
+                              </div>
+                              <p className="mt-1.5 text-[10px] text-slate-500">
+                                {nEvid} covered · {nPart} partial · {nMiss} missing
+                              </p>
+                            </div>
+                          </div>
+
+                          {cov.length > 0 && (
+                            <div className="mt-3 flex flex-wrap gap-1.5">
+                              {cov
+                                .filter((c) => c.status === "evidenced")
+                                .slice(0, 6)
+                                .map((c, i) => (
+                                  <span key={`m${i}`} className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                                    ✓ {c.requirement}
+                                  </span>
+                                ))}
+                              {cov
+                                .filter((c) => c.status === "partial")
+                                .slice(0, 4)
+                                .map((c, i) => (
+                                  <span key={`p${i}`} className="px-1.5 py-0.5 rounded text-[9px] bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                                    ~ {c.requirement}
+                                  </span>
+                                ))}
+                              {cov
+                                .filter((c) => c.status === "missing")
+                                .slice(0, 6)
+                                .map((c, i) => (
+                                  <span key={`x${i}`} className="px-1.5 py-0.5 rounded text-[9px] bg-rose-500/10 text-rose-300 border border-rose-500/30">
+                                    ✗ {c.requirement}
+                                  </span>
+                                ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()
+                  ) : null}
+                </div>
+              )}
+
               {!bank ? (
                 <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/20 p-8 text-center">
-                  <h3 className="text-sm font-semibold text-slate-400">Plan appears here</h3>
-                  <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">
-                    Every question is reviewable before the candidate joins. The interviewer
-                    receives only what is approved — it has no live access to Slack or
-                    Confluence.
-                  </p>
+                  {preparing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin text-indigo-400 mx-auto mb-3" />
+                      <h3 className="text-sm font-semibold text-slate-300">Designing the full interview plan…</h3>
+                      <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">
+                        The ATS score is ready above. The tailored question set takes about a minute — it appears here when done.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="text-sm font-semibold text-slate-400">Plan appears here</h3>
+                      <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">
+                        Every question is reviewable before the candidate joins. The interviewer
+                        receives only what is approved — it has no live access to Slack or
+                        Confluence.
+                      </p>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="rounded-2xl border border-slate-800 bg-slate-900/40 overflow-hidden">
@@ -603,6 +703,90 @@ export default function AdminPage() {
                   </div>
 
                   <div className="max-h-[48vh] overflow-y-auto">
+                    {bank.jdCoverage && bank.jdCoverage.length > 0 && (() => {
+                      const cov = bank.jdCoverage;
+                      const nEvid = cov.filter((c) => c.status === "evidenced").length;
+                      const nPart = cov.filter((c) => c.status === "partial").length;
+                      const nMiss = cov.filter((c) => c.status === "missing").length;
+                      const total = cov.length || 1;
+                      const fit = Math.round(((nEvid + nPart * 0.5) / total) * 100);
+                      const GROUPS = [
+                        {
+                          key: "evidenced",
+                          title: "Covered by résumé",
+                          border: "border-l-emerald-500/60",
+                          tag: "text-emerald-300 bg-emerald-500/10 border-emerald-500/30",
+                          items: cov.filter((c) => c.status === "evidenced"),
+                        },
+                        {
+                          key: "partial",
+                          title: "Partially covered",
+                          border: "border-l-amber-500/60",
+                          tag: "text-amber-300 bg-amber-500/10 border-amber-500/30",
+                          items: cov.filter((c) => c.status === "partial"),
+                        },
+                        {
+                          key: "missing",
+                          title: "Not evidenced — interview will probe",
+                          border: "border-l-rose-500/60",
+                          tag: "text-rose-300 bg-rose-500/10 border-rose-500/30",
+                          items: cov.filter((c) => c.status === "missing"),
+                        },
+                      ];
+                      return (
+                        <div className="px-5 py-4 border-b border-slate-800/60">
+                          <div className="flex items-center justify-between mb-2.5">
+                            <p className="text-[11px] font-bold text-slate-200">Résumé ↔ JD match</p>
+                            <span className="text-xs font-bold text-slate-300">{fit}% fit</span>
+                          </div>
+
+                          {/* Proportional fit bar */}
+                          <div className="flex h-2 w-full rounded-full overflow-hidden bg-slate-800 mb-1">
+                            {nEvid > 0 && <div className="bg-emerald-500" style={{ width: `${(nEvid / total) * 100}%` }} />}
+                            {nPart > 0 && <div className="bg-amber-500" style={{ width: `${(nPart / total) * 100}%` }} />}
+                            {nMiss > 0 && <div className="bg-rose-500" style={{ width: `${(nMiss / total) * 100}%` }} />}
+                          </div>
+                          <div className="flex items-center gap-3 text-[10px] text-slate-500 mb-3">
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500" />{nEvid} covered</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500" />{nPart} partial</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-rose-500" />{nMiss} missing</span>
+                          </div>
+
+                          <div className="space-y-3">
+                            {GROUPS.filter((g) => g.items.length > 0).map((g) => (
+                              <div key={g.key}>
+                                <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-1.5">
+                                  {g.title} ({g.items.length})
+                                </p>
+                                <div className="space-y-1.5">
+                                  {g.items.map((c, i) => (
+                                    <div
+                                      key={i}
+                                      className={`rounded-r-lg bg-slate-950/40 border-l-2 ${g.border} pl-2.5 pr-2 py-1.5`}
+                                    >
+                                      <p className="text-[11px] font-medium text-slate-200 leading-snug">
+                                        {c.requirement}
+                                      </p>
+                                      {c.evidence && (
+                                        <p className="mt-0.5 text-[10px] text-slate-500 leading-relaxed">
+                                          {c.evidence}
+                                        </p>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <p className="mt-3 text-[10px] text-slate-600 leading-relaxed">
+                            Judged from the résumé &amp; JD only, before the interview. Missing items are what the call
+                            will focus on.
+                          </p>
+                        </div>
+                      );
+                    })()}
+
                     <div className="px-5 py-4 border-b border-slate-800/60">
                       <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">
                         Rubric

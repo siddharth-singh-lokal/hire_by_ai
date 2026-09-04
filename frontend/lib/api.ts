@@ -50,6 +50,7 @@ export interface QuestionBank {
   questions: BankQuestion[];
   claimsToVerify: { claim: string; jdRequirement: string }[];
   unevidencedRequirements: string[];
+  jdCoverage: { requirement: string; status: "evidenced" | "partial" | "missing"; evidence: string }[];
   openingLine: string;
 }
 
@@ -181,6 +182,17 @@ export function prepareInterview(input: {
   language: string;
 }): Promise<PrepareResult> {
   return post<PrepareResult>("/api/prepare", input);
+}
+
+export interface AtsScore {
+  atsScore: number;
+  verdict: string;
+  coverage: { requirement: string; status: "evidenced" | "partial" | "missing"; evidence: string }[];
+}
+
+/** Fast résumé-vs-JD match score, shown while the full plan generates. */
+export function fetchAtsScore(jdText: string, resumeText: string): Promise<AtsScore> {
+  return post<AtsScore>("/api/ats-score", { jdText, resumeText });
 }
 
 /** Server-side PDF extraction — keeps a heavy PDF.js bundle out of the client. */

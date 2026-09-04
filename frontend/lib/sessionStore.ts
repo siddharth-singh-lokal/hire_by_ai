@@ -19,7 +19,8 @@ export type RedFlagType =
   | "CANDIDATE_ABSENT"
   | "TAB_SWITCH_DETECTED"
   | "PHONE_DETECTED"
-  | "LOOKING_AWAY";
+  | "LOOKING_AWAY"
+  | "READING_MATERIAL";
 
 /**
  * Only these prompt the interviewer to ask the candidate about it, live.
@@ -56,6 +57,7 @@ export const RED_FLAG_LABELS: Record<RedFlagType, string> = {
   TAB_SWITCH_DETECTED: "Navigated Away From Tab",
   PHONE_DETECTED: "Phone In Frame",
   LOOKING_AWAY: "Looking Away From Screen",
+  READING_MATERIAL: "Notes / Second Screen In Frame",
 };
 
 /** What the interviewer is told she is seeing, so she can ask about it naturally. */
@@ -67,6 +69,10 @@ export const RED_FLAG_WARNINGS: Record<RedFlagType, string> = {
   PHONE_DETECTED: "The candidate appears to be looking at or using a phone or handheld device",
   LOOKING_AWAY:
     "The candidate keeps looking away from the screen, as if reading an answer from somewhere else",
+  // Log-only (not in PROBEABLE_FLAGS) — the recruiter judges it from the snapshot;
+  // the interviewer never confronts the candidate over a possible notebook.
+  READING_MATERIAL:
+    "A book, notes, or a second screen is visible in the candidate's camera frame",
 };
 
 interface SessionEvidence {

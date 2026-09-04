@@ -43,6 +43,7 @@ const BANK: QuestionBank = {
   rubric: [],
   claimsToVerify: [],
   unevidencedRequirements: [],
+  jdCoverage: [],
   openingLine: "Hi {{name}}, thanks for making the time — I'd love to hear about the frontend work you've been doing lately.",
   questions: [
     {

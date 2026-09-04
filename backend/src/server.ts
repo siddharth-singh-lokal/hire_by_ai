@@ -3,7 +3,8 @@ import "./env";
 import express, { Request, Response } from "express";
 import { createServer } from "http";
 import cors from "cors";
-import { EVALUATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
+import { EVALUATION_MODEL_ID, GENERATION_MODEL_ID, SONIC_MODEL_ID, AWS_REGION } from "./bedrock";
+import { callJson } from "./llm";
 import { attachNovaSonicRelay } from "./novaSonic";
 import { generateQuestionBank, loadContextPack, InterviewDuration, QuestionBank } from "./questionBank";
 import { resolveLanguage } from "./languages";
@@ -84,6 +85,74 @@ app.post("/api/extract-text", async (req: Request, res: Response) => {
       error: "EXTRACT_FAILED",
       message: "Could not read that PDF. Paste the text instead.",
     });
+  }
+});
+
+// 1a-ii. ATS match score. A fast résumé-vs-JD read the admin sees WHILE the full
+// question bank generates (that takes ~a minute; this returns in a few seconds).
+// One small LLM call — like an applicant-tracking system's keyword match, but
+// aware of synonyms and seniority rather than literal string matching.
+app.post("/api/ats-score", async (req: Request, res: Response) => {
+  try {
+    const { jdText, resumeText } = req.body || {};
+    if (!jdText?.trim() || !resumeText?.trim()) {
+      return res.status(400).json({
+        error: "MISSING_INPUT",
+        message: "Both a job description and a resume are required.",
+      });
+    }
+    const { parsed } = await callJson({
+      modelId: GENERATION_MODEL_ID,
+      system: `You are a recruiter doing a first-pass résumé-vs-JD read — not a keyword-matching ATS. Every JD emphasises different things; candidates rarely mirror a posting line-for-line. Your job is to judge whether this person plausibly fits the ROLE and DOMAIN, using what they have actually done before.
+
+MATCHING PHILOSOPHY — medium bar, not tight:
+- Judge domain and transferable experience first, then specific tools. Someone who built high-traffic APIs in e-commerce partially evidences a fintech backend role even if the stack differs. Someone who led field teams partially evidences an ops role even if the industry differs.
+- Synonyms and adjacent skills count: React ≈ ReactJS, Postgres ≈ PostgreSQL, "led a team" ≈ people management, mobile apps ≈ Android if the JD asks for mobile.
+- Use "partial" generously when past work is in the same ballpark — different company, stack, or sub-domain is partial, not missing.
+- Reserve "missing" for requirements with genuinely no adjacent signal on the résumé (not merely unstated keywords).
+- Do NOT extract every bullet from the JD. Pick 5-8 material themes: domain/industry, seniority/scope, 2-4 core competencies, and anything explicitly day-one critical. Ignore boilerplate ("team player", "fast-paced environment").
+
+SCORING 0-100 — calibrated leniently:
+- 80-95: same domain or clearly transferable track, most core themes evidenced or partial
+- 65-79: reasonable fit — strong in some themes, gaps in others, but past work suggests they could grow into it
+- 45-64: partial overlap — worth a screen to probe gaps, not an auto-reject
+- below 45: different domain/seniority with little transferable signal
+When in doubt between two bands, score toward the higher one if their past projects suggest relevant reasoning.
+
+For each requirement/theme, status:
+- "evidenced": clearly demonstrated on the résumé (cite the line/claim)
+- "partial": touched adjacently, different stack/domain but same kind of work, or seniority close but scope thinner
+- "missing": no reasonable signal — not "keyword not found"
+
+Return ONLY: {
+  "atsScore": 0-100,
+  "verdict": "one short phrase, e.g. 'Strong match' | 'Good fit, some gaps' | 'Worth screening' | 'Weak overlap'",
+  "coverage": [{"requirement": "plain-words theme (domain-aware, not a JD bullet copy)", "status": "evidenced|partial|missing", "evidence": "the résumé claim that supports it, or why it is partial/missing with reference to their past work"}]
+}`,
+      user: `=== JOB DESCRIPTION ===\n${String(jdText).slice(0, 12000)}\n\n=== RÉSUMÉ ===\n${String(resumeText).slice(0, 12000)}`,
+      maxTokens: 1200,
+      temperature: 0.2,
+      label: "ats-score",
+    });
+
+    const score = Math.max(0, Math.min(100, Math.round(Number(parsed?.atsScore) || 0)));
+    const allowed = new Set(["evidenced", "partial", "missing"]);
+    const coverage = (Array.isArray(parsed?.coverage) ? parsed.coverage : [])
+      .map((c: any) => ({
+        requirement: String(c?.requirement || "").trim(),
+        status: allowed.has(c?.status) ? c.status : "partial",
+        evidence: String(c?.evidence || "").trim(),
+      }))
+      .filter((c: any) => c.requirement)
+      .slice(0, 12);
+    return res.json({
+      atsScore: score,
+      verdict: String(parsed?.verdict || "").trim(),
+      coverage,
+    });
+  } catch (error: any) {
+    console.error("[ATS] Failed:", error?.message);
+    return res.status(500).json({ error: "ATS_FAILED", message: error?.message || "Could not score." });
   }
 });
 

@@ -27,6 +27,7 @@ const BANK: QuestionBank = {
   ],
   claimsToVerify: [],
   unevidencedRequirements: [],
+  jdCoverage: [],
   openingLine: "Hi {{name}}.",
 };
 
