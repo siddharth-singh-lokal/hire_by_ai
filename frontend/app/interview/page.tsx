@@ -27,7 +27,7 @@ import {
   RED_FLAG_WARNINGS,
   type RedFlag,
 } from "@/lib/sessionStore";
-import { completeInterview, fetchCandidateSession, type CandidateSessionDetail } from "@/lib/api";
+import { completeInterview, uploadRecording, fetchCandidateSession, type CandidateSessionDetail } from "@/lib/api";
 import { languagePhrase } from "@/lib/languages";
 import { AudioReactiveVisualizer } from "@/components/AudioReactiveVisualizer";
 
@@ -188,13 +188,26 @@ function InterviewRoom() {
       endingRef.current = true;
       setIsFinalising(true);
 
+      let recordingBlob: Blob | null = null;
       try {
-        await stopRecording();
+        recordingBlob = await stopRecording();
       } catch (e) {
         console.error("Recorder stop failed:", e);
       }
 
       endInterview();
+
+      // Upload the full recording to the backend so the recruiter can watch it
+      // on the scorecard from their own machine. Awaited before navigating —
+      // a large upload aborts if the tab moves on — which is why the candidate
+      // sees "Finishing…" for a moment.
+      if (sessionId && recordingBlob && recordingBlob.size > 0) {
+        try {
+          await uploadRecording(sessionId, recordingBlob);
+        } catch (e) {
+          console.error("Recording upload failed:", e);
+        }
+      }
 
       // Tell the server the interview is over and hand over the proctoring
       // flags, which only exist in this browser. The transcript is already

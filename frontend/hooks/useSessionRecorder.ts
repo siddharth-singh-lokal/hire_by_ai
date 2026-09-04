@@ -28,8 +28,8 @@ export interface UseSessionRecorderReturn {
   isRecording: boolean;
   error: string | null;
   start: (stream: MediaStream) => void;
-  /** Resolves once the final blob is stored. */
-  stop: () => Promise<void>;
+  /** Resolves with the final recording blob (or null) once stored. */
+  stop: () => Promise<Blob | null>;
 }
 
 export function useSessionRecorder(): UseSessionRecorderReturn {
@@ -73,12 +73,12 @@ export function useSessionRecorder(): UseSessionRecorderReturn {
     }
   }, []);
 
-  const stop = useCallback((): Promise<void> => {
+  const stop = useCallback((): Promise<Blob | null> => {
     return new Promise((resolve) => {
       const recorder = recorderRef.current;
       if (!recorder || recorder.state === "inactive") {
         setIsRecording(false);
-        return resolve();
+        return resolve(null);
       }
 
       recorder.onstop = () => {
@@ -91,7 +91,7 @@ export function useSessionRecorder(): UseSessionRecorderReturn {
         chunksRef.current = [];
         recorderRef.current = null;
         setIsRecording(false);
-        resolve();
+        resolve(blob);
       };
 
       recorder.stop();

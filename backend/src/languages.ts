@@ -56,8 +56,11 @@ export const LANGUAGES: Record<LanguageCode, LanguageConfig> = {
     label: "English",
     nativeLabel: "English",
     sonicSupported: true,
-    voiceId: "tiffany",
-    interviewerName: "Sarah Chen",
+    // `arjun` is Nova 2 Sonic's Indian English (en-IN) MASCULINE voice — an
+    // Indian-accented male. (`kiara` is its Indian female counterpart; `matthew`
+    // is US male.) Overridable at runtime with BEDROCK_SONIC_VOICE.
+    voiceId: "arjun",
+    interviewerName: "Arjun Sharma",
     directive: "",
   },
   hinglish: {

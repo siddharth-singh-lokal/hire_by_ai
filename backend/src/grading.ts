@@ -2,6 +2,7 @@ import { evaluateInterview, evaluateGeneric } from "./evaluate";
 import { loadContextPack } from "./questionBank";
 import { getSession, updateSession } from "./sessionStore";
 import { LANGUAGES } from "./languages";
+import { translateTranscriptToEnglish } from "./translate";
 
 function languageLabel(code?: string): string {
   return (code && LANGUAGES[code as keyof typeof LANGUAGES]?.label) || "English";
@@ -52,6 +53,17 @@ export async function gradeSession(sessionId: string, reason?: string): Promise<
   const started = Date.now();
 
   try {
+    // A non-English screen is translated to English (original kept) so the
+    // recruiter can read it. Best-effort and off the live path — do it here,
+    // once, before grading. Grading itself works in the original language.
+    if (session.language && session.language !== "en") {
+      const translated = await translateTranscriptToEnglish(
+        session.transcripts,
+        languageLabel(session.language)
+      );
+      updateSession(sessionId, { transcripts: translated });
+    }
+
     const evaluation = await evaluateInterview({
       bank: session.bank,
       candidateName: session.candidateName,

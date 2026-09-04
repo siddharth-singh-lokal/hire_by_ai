@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { IntegrityAuditPanel } from "@/components/IntegrityAuditPanel";
-import { fetchScorecard, regradeInterview, BACKEND_URL } from "@/lib/api";
+import { fetchScorecard, regradeInterview, recordingUrl, BACKEND_URL } from "@/lib/api";
 import type { RedFlag } from "@/lib/sessionStore";
 
 const VERDICT_STYLE: Record<string, string> = {
@@ -66,6 +66,7 @@ function Scorecard() {
   const [generic, setGeneric] = useState<any>(null);
   const [transcripts, setTranscripts] = useState<any[]>([]);
   const [flags, setFlags] = useState<RedFlag[]>([]);
+  const [hasRecording, setHasRecording] = useState(false);
   const [tab, setTab] = useState<"evidence" | "gaps" | "transcript">("evidence");
 
   const run = useCallback(async () => {
@@ -84,6 +85,7 @@ function Scorecard() {
         setEvaluation(result.evaluation);
         setGeneric(result.genericComparison || null);
         setTranscripts(result.transcripts || []);
+        setHasRecording(Boolean(result.hasRecording));
         setFlags(
           (result.redFlags || []).map((f, i) => ({
             id: `flag_${i}`,
@@ -396,7 +398,18 @@ function Scorecard() {
                       >
                         {t.sender === "candidate" ? "Candidate" : "Interviewer"}
                       </span>
-                      <p className="text-xs text-slate-300 leading-relaxed">{t.text}</p>
+                      <div className="min-w-0">
+                        {/* Show English when the interview was in another language;
+                            keep the verbatim original beneath it for evidence. */}
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {t.textEn || t.text}
+                        </p>
+                        {t.textEn && t.textEn !== t.text && (
+                          <p className="text-[11px] text-slate-500 leading-relaxed mt-0.5 italic">
+                            {t.text}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -494,7 +507,10 @@ function Scorecard() {
             </section>
           )}
 
-          <IntegrityAuditPanel flags={flags} />
+          <IntegrityAuditPanel
+            flags={flags}
+            recordingSrc={hasRecording && sessionId ? recordingUrl(sessionId) : null}
+          />
 
           <p className="text-[10px] text-slate-600 leading-relaxed px-1">
             Evidence for a human decision — not a hiring decision. Scored by{" "}

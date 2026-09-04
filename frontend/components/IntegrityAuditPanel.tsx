@@ -16,7 +16,10 @@ function formatTimestamp(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export const IntegrityAuditPanel: React.FC<{ flags?: RedFlag[] }> = ({ flags: flagsProp }) => {
+export const IntegrityAuditPanel: React.FC<{ flags?: RedFlag[]; recordingSrc?: string | null }> = ({
+  flags: flagsProp,
+  recordingSrc,
+}) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [flags, setFlags] = useState<RedFlag[]>([]);
@@ -27,12 +30,14 @@ export const IntegrityAuditPanel: React.FC<{ flags?: RedFlag[] }> = ({ flags: fl
   // mount rather than during render.
   useEffect(() => {
     const session = getSession();
-    setRecordingUrl(session.recordingUrl);
+    // Prefer the server-hosted recording (what the recruiter sees on their own
+    // machine); fall back to the in-memory blob URL for a same-tab demo.
+    setRecordingUrl(recordingSrc ?? session.recordingUrl);
     // Prefer flags handed in from the graded session — that is what the recruiter
     // sees on their own machine, where the local store is empty. Fall back to the
     // in-memory store for a same-tab demo.
     setFlags(flagsProp ?? session.redFlags);
-  }, [flagsProp]);
+  }, [flagsProp, recordingSrc]);
 
   const jumpTo = (flag: RedFlag) => {
     setActiveFlagId(flag.id);

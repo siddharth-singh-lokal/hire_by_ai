@@ -451,7 +451,11 @@ export function attachNovaSonicRelay(server: Server): void {
             sampleRateHertz: AUDIO_OUTPUT_SAMPLE_RATE,
             sampleSizeBits: 16,
             channelCount: 1,
-            voiceId: lang.voiceId,
+            // Per-language voice, overridable at runtime with BEDROCK_SONIC_VOICE
+            // so a different voice (e.g. an Indian male one) can be tried without
+            // a code change. An invalid id makes Sonic reject the stream, so only
+            // set the override to a voice the account actually has.
+            voiceId: process.env.BEDROCK_SONIC_VOICE || lang.voiceId,
             encoding: "base64",
             audioType: "SPEECH",
           },

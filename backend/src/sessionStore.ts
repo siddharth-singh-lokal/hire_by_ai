@@ -36,6 +36,12 @@ export interface StoredTranscript {
   sender: "candidate" | "interviewer";
   text: string;
   timestamp: number;
+  /**
+   * English translation of `text`, populated after grading when the interview
+   * was conducted in a non-English language. `text` stays the verbatim original
+   * (for evidence quotes); the recruiter reads `textEn`.
+   */
+  textEn?: string;
 }
 
 export interface StoredRedFlag {
@@ -86,6 +92,12 @@ export interface InterviewSession {
    * "broken call" at a glance.
    */
   streamDrops?: number;
+  /**
+   * MIME type of the full interview recording, set once the browser uploads it
+   * on completion. Presence of this field is how the scorecard knows a recording
+   * exists to play. The bytes live in `.evidence/<id>.rec`, never in this store.
+   */
+  recordingMime?: string;
 }
 
 const sessions = new Map<string, InterviewSession>();
@@ -310,6 +322,36 @@ export function updateSession(id: string, patch: Partial<InterviewSession>): voi
   Object.assign(session, patch);
   if (patch.redFlags) persistEvidence(session);
   persist();
+}
+
+/**
+ * Stores the full interview recording as a raw binary file, out of the hot
+ * store. Recordings are tens of megabytes — base64 in JSON would be ruinous, so
+ * the bytes go straight to disk and only the MIME type is kept on the session.
+ */
+export function saveRecording(id: string, data: Buffer, mime: string): boolean {
+  const session = sessions.get(id);
+  if (!session) return false;
+  const file = path.join(EVIDENCE_DIR, `${id}.rec`);
+  try {
+    fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, data);
+    fs.renameSync(`${file}.tmp`, file);
+    session.recordingMime = mime || "video/webm";
+    persist();
+    return true;
+  } catch (err: any) {
+    console.error(`[sessionStore] Could not save recording for ${id}:`, err?.message);
+    return false;
+  }
+}
+
+/** Path + MIME of a session's recording, or null if none was uploaded. */
+export function getRecording(id: string): { path: string; mime: string } | null {
+  const session = sessions.get(id);
+  const file = path.join(EVIDENCE_DIR, `${id}.rec`);
+  if (!session?.recordingMime || !fs.existsSync(file)) return null;
+  return { path: file, mime: session.recordingMime };
 }
 
 /** Increments the relay's drop counter for a session. */

@@ -8,12 +8,15 @@ import { attachNovaSonicRelay } from "./novaSonic";
 import { generateQuestionBank, loadContextPack, InterviewDuration, QuestionBank } from "./questionBank";
 import { resolveLanguage } from "./languages";
 import { llmProviderStatus } from "./llm";
+import * as fs from "fs";
 import {
   createSession,
   getSession,
   getSessionByEmail,
   listSessions,
   updateSession,
+  saveRecording,
+  getRecording,
 } from "./sessionStore";
 import { gradeSession } from "./grading";
 
@@ -413,6 +416,59 @@ app.post("/api/interview/:id/complete", (req: Request, res: Response) => {
   return res.json({ success: true });
 });
 
+// Full interview recording upload. Sent as raw binary (a recording is tens of
+// megabytes — base64 in JSON would be ruinous), stored to disk out of the hot
+// store. Its own body parser with a large cap, applied only to this route.
+app.post(
+  "/api/interview/:id/recording",
+  express.raw({ type: () => true, limit: "300mb" }),
+  (req: Request, res: Response) => {
+    const session = getSession(String(req.params.id));
+    if (!session) return res.status(404).json({ error: "NOT_FOUND", message: "No such session." });
+    const body = req.body as Buffer;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return res.status(400).json({ error: "EMPTY", message: "No recording data received." });
+    }
+    const ok = saveRecording(
+      session.id,
+      body,
+      String(req.headers["content-type"] || "video/webm")
+    );
+    if (!ok) return res.status(500).json({ error: "SAVE_FAILED", message: "Could not store recording." });
+    console.log(`[Recording] ${session.id} — stored ${(body.length / 1e6).toFixed(1)}MB`);
+    return res.json({ success: true });
+  }
+);
+
+// Streams the stored interview recording back to the recruiter scorecard, with
+// HTTP range support so the <video> element can seek.
+app.get("/api/interview/:id/recording", (req: Request, res: Response) => {
+  const rec = getRecording(String(req.params.id));
+  if (!rec) return res.status(404).json({ error: "NOT_FOUND", message: "No recording for this session." });
+
+  const stat = fs.statSync(rec.path);
+  const range = req.headers.range;
+  res.setHeader("Content-Type", rec.mime);
+  res.setHeader("Accept-Ranges", "bytes");
+
+  if (range) {
+    const match = /bytes=(\d*)-(\d*)/.exec(range);
+    const start = match && match[1] ? parseInt(match[1], 10) : 0;
+    const end = match && match[2] ? parseInt(match[2], 10) : stat.size - 1;
+    if (start >= stat.size || end >= stat.size) {
+      res.setHeader("Content-Range", `bytes */${stat.size}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+    res.setHeader("Content-Length", end - start + 1);
+    return fs.createReadStream(rec.path, { start, end }).pipe(res);
+  }
+
+  res.setHeader("Content-Length", stat.size);
+  return fs.createReadStream(rec.path).pipe(res);
+});
+
 // 1c. Context pack inspection — powers the "what will be asked, and is it safe"
 // panel. Returns scenarios only; provenance stays server-side.
 app.get("/api/context-pack", (_req: Request, res: Response) => {
@@ -475,6 +531,7 @@ app.get("/api/scorecard/:id", (req: Request, res: Response) => {
       genericComparison: (session.scorecard as any).genericComparison || null,
       transcripts: session.transcripts,
       redFlags: session.redFlags,
+      hasRecording: Boolean(session.recordingMime),
       terminationReason: session.terminationReason,
     });
   }

@@ -237,7 +237,7 @@ export interface ScorecardResponse {
   role?: string;
   evaluation?: any;
   genericComparison?: any;
-  transcripts?: any[];
+  transcripts?: { sender: string; text: string; textEn?: string; timestamp?: number }[];
   redFlags?: {
     type: string;
     description: string;
@@ -245,6 +245,7 @@ export interface ScorecardResponse {
     snapshot?: string;
     clip?: string;
   }[];
+  hasRecording?: boolean;
   transcriptCount?: number;
   terminationReason?: string;
   message?: string;
@@ -261,4 +262,18 @@ export async function fetchScorecard(sessionId: string): Promise<ScorecardRespon
 
 export function regradeInterview(sessionId: string): Promise<{ success: boolean }> {
   return post(`/api/scorecard/${sessionId}/regrade`, {});
+}
+
+/** Uploads the full interview recording as raw binary to the backend. */
+export async function uploadRecording(sessionId: string, blob: Blob): Promise<void> {
+  await fetch(`${BACKEND_URL}/api/interview/${sessionId}/recording`, {
+    method: "POST",
+    headers: { "Content-Type": blob.type || "video/webm" },
+    body: blob,
+  });
+}
+
+/** URL the recruiter scorecard points its <video> at. */
+export function recordingUrl(sessionId: string): string {
+  return `${BACKEND_URL}/api/interview/${sessionId}/recording`;
 }

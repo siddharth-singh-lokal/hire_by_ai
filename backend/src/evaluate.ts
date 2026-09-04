@@ -216,10 +216,41 @@ export async function evaluateInterview(input: EvaluateInput): Promise<GroundedS
       ? claimed
       : deterministic;
 
+  /**
+   * "Do not advance" requires POSITIVE evidence of a mismatch. A near-silent or
+   * platform-broken transcript cannot provide that — there simply wasn't enough
+   * conversation to conclude anything. The prompt says as much, but the model is
+   * stochastic and occasionally rejects a candidate for the interview's own
+   * emptiness (the "Do not advance · 12" on a call that barely happened). Guard
+   * it deterministically: below this much candidate speech, or on a compromised
+   * call, the worst allowed verdict is "Needs discussion", and the score floors
+   * out of the clear-reject band. A broken call is never the candidate's fault.
+   */
+  const candidateWords = input.transcripts
+    .filter((t) => t.sender === "candidate")
+    .reduce((n, t) => n + t.text.split(/\s+/).filter(Boolean).length, 0);
+  const tooThinToFail = candidateWords < 40 || modelQuality === "compromised";
+
+  let verdict = parsed.verdict;
+  let overallScore = Number(parsed.overallScore);
+  let rescreenRecommended = Boolean(parsed.rescreenRecommended);
+  let recommendationReason = parsed.recommendationReason;
+
+  if (tooThinToFail && verdict === "Do not advance") {
+    verdict = "Needs discussion";
+    rescreenRecommended = true;
+    overallScore = Math.max(Number.isFinite(overallScore) ? overallScore : 0, 35);
+    recommendationReason =
+      "Too little of the interview was usable to judge fairly — the conversation was very short or disrupted. Re-screen on a stable connection before any decision.";
+  }
+
   return {
     ...parsed,
+    verdict,
+    overallScore,
+    recommendationReason,
     screenQuality: modelQuality,
-    rescreenRecommended: Boolean(parsed.rescreenRecommended),
+    rescreenRecommended,
     screenQualityNote: modelQuality === "clean" ? "" : String(parsed.screenQualityNote || ""),
     streamDrops: input.streamDrops,
     candidateName: input.candidateName,

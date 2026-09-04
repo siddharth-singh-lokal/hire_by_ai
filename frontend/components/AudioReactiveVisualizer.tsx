@@ -141,7 +141,7 @@ export const AudioReactiveVisualizer: React.FC<AudioReactiveVisualizerProps> = (
     : connectionState !== "active"
     ? "Connecting…"
     : isAiSpeaking
-    ? "Sarah Chen is speaking..."
+    ? "Interviewer is speaking..."
     : isUserSpeaking
     ? "Listening to Candidate..."
     : "Ready & Listening";
