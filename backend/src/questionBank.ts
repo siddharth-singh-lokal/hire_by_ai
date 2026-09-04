@@ -2,6 +2,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { GENERATION_MODEL_ID } from "./bedrock";
 import { callJson } from "./llm";
+import {
+  researchMarketInterviewQuestions,
+  formatWebResearchForPrompt,
+  WebResearchResult,
+  SuggestedMarketQuestion,
+} from "./webInterviewResearch";
 import { ContextPack } from "./contextPack/types";
 import { LanguageConfig, LANGUAGES, DEFAULT_LANGUAGE } from "./languages";
 
@@ -98,8 +104,8 @@ export interface RubricAxis {
 
 export interface BankQuestion {
   id: string;
-  /** resume_probe verifies a claim; technical tests JD skills; jd_gap covers a stated requirement; scenario is legacy org-context. */
-  kind: "resume_probe" | "technical" | "scenario" | "jd_gap";
+  /** resume_probe | technical | market (web/forum) | jd_gap | scenario (legacy) */
+  kind: "resume_probe" | "technical" | "market" | "scenario" | "jd_gap";
   question: string;
   /** What this question is actually trying to find out. */
   intent: string;
@@ -113,6 +119,9 @@ export interface BankQuestion {
   weakAnswer: string[];
   /** Scenario id from the Context Pack, when this question came from one. */
   scenarioId?: string;
+  /** Forum/source when kind is market (LeetCode, Blind, etc.). */
+  sourceName?: string;
+  sourceUrl?: string;
   /** Budgeted minutes, so the interviewer can pace itself. */
   minutes: number;
 }
@@ -138,6 +147,14 @@ export interface QuestionBank {
    * that was not built for that job.
    */
   discipline?: string;
+  /** Web research metadata — what was fetched from interview forums. */
+  webResearch?: {
+    roleHint: string;
+    queries: string[];
+    hitCount: number;
+    fromWeb: boolean;
+    sources: { site: string; title: string; url: string }[];
+  };
 }
 
 /** How much actually fits. A 15-minute interview that tries to do six things does none. */
@@ -146,13 +163,13 @@ export interface QuestionBank {
 // resume walk-throughs), and jd_gap (stated requirements the resume doesn't show).
 const DURATION_PLAN: Record<
   InterviewDuration,
-  { projects: number; technical: number; scenarios: number; gaps: number }
+  { projects: number; technical: number; market: number; scenarios: number; gaps: number }
 > = {
-  1: { projects: 1, technical: 0, scenarios: 0, gaps: 0 },
-  5: { projects: 1, technical: 1, scenarios: 0, gaps: 0 },
-  15: { projects: 2, technical: 1, scenarios: 0, gaps: 1 },
-  30: { projects: 2, technical: 2, scenarios: 0, gaps: 1 },
-  45: { projects: 3, technical: 2, scenarios: 0, gaps: 2 },
+  1: { projects: 1, technical: 0, market: 0, scenarios: 0, gaps: 0 },
+  5: { projects: 1, technical: 0, market: 1, scenarios: 0, gaps: 0 },
+  15: { projects: 2, technical: 1, market: 1, scenarios: 0, gaps: 1 },
+  30: { projects: 2, technical: 1, market: 2, scenarios: 0, gaps: 1 },
+  45: { projects: 3, technical: 1, market: 2, scenarios: 0, gaps: 2 },
 };
 
 export function loadContextPack(): ContextPack | null {
@@ -214,9 +231,10 @@ function inferDiscipline(jdText: string): string {
 
 function buildSystemPrompt(
   pack: ContextPack | null,
-  plan: { projects: number; technical: number; scenarios: number; gaps: number },
+  plan: { projects: number; technical: number; market: number; scenarios: number; gaps: number },
   duration: InterviewDuration,
-  discipline: string
+  discipline: string,
+  webResearchSection: string
 ): string {
   const roleContext = loadRoleContext(discipline);
   // Only scenarios tagged for this discipline (or genuinely role-agnostic ones).
@@ -327,16 +345,17 @@ STAY IN THE CANDIDATE'S DOMAIN — THIS IS CRITICAL
 Read the JD and resume to work out what this person actually does: backend, frontend, mobile, data/analytics, ML, platform/DevOps, QA, security, product, design, or something else. Every question must belong to THAT domain. A frontend engineer gets frontend questions; a data analyst gets data and analytics questions; a PM gets product questions. Do NOT default to backend, distributed-systems, or infrastructure topics unless the role is genuinely a backend/infra role. Asking a frontend or analytics candidate about connection pools, message queues, Redis, or database internals is a failure of the interview — it measures nothing relevant and tells them the interview was not built for them.
 ${packSection}${roleSection}
 
-DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.technical} technical question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
+DURATION: ${duration} minutes. Generate exactly ${plan.projects} resume_probe question(s), ${plan.technical} technical question(s), ${plan.market} market question(s), and ${plan.gaps} jd_gap question(s). Budget minutes per question so the total fits ${duration} minutes including a brief intro and wrap-up. Do not exceed the budget — an interview that runs long gets cut off mid-answer and wastes the whole session.
 ${
     plan.scenarios === 0
-      ? `DO NOT create any "scenario" questions tied to org-internal incidents. No "imagine you're supporting our production system where…" set-ups. Use "resume_probe", "technical", and "jd_gap" as the only values for "kind".`
+      ? `DO NOT create any "scenario" questions tied to org-internal incidents. Use "resume_probe", "technical", "market", and "jd_gap" as the only values for "kind".`
       : ""
   }
 
-INTERVIEW SHAPE — alternate resume and technical
-- Do NOT make every question a resume walk-through. At least ${plan.technical} question(s) must be standalone technical — drawn from JD skills and responsibilities, not from a line on the résumé.
-- Interleave types where possible: resume → technical → resume → gap, so the conversation feels like a real screen, not a CV audit.
+INTERVIEW SHAPE — alternate resume, technical, and market questions
+- Do NOT make every question a resume walk-through. Mix resume verification with JD technical questions AND market questions (what candidates report on LeetCode, Blind, Glassdoor for this role).
+- Include exactly ${plan.market} question(s) with kind "market" — grounded in the WEB-GROUNDED section below when present.
+${webResearchSection}
 
 RUBRIC
 Always include these five fixed axes, so candidates stay comparable across roles:
@@ -351,7 +370,8 @@ CULTURE CRITERIA COME FROM THE JD. If the JD describes working style — comfort
 
 QUESTION DESIGN
 - resume_probe: pick the most substantial thing on the resume and test whether they actually own it. Someone who did the work can explain a decision they rejected; someone narrating a README cannot. Use several of these, each on a DIFFERENT project/claim, so the interview covers the breadth of what they've done rather than drilling one thing to death.
-- technical: test a core skill the JD requires — reasoning, tradeoffs, debugging approach, or how they'd solve a realistic problem in this role's domain. Draw from JD responsibilities and required tools/skills, NOT from the resume. Examples: "How would you approach…", "What tradeoff would you weigh between…", "Walk me through how you'd debug…". Screening depth only — one concept, answerable in a few minutes. No trivia, no trick questions, no org-internal systems they cannot know.
+- technical: test a core skill the JD requires — reasoning, tradeoffs, debugging approach, or how they'd solve a realistic problem in this role's domain. Draw from JD responsibilities and required tools/skills, NOT from the resume.
+- market: a question commonly reported for this role on public interview forums (LeetCode Discuss, Blind, Glassdoor). Use the WEB-GROUNDED section. Voice-conversation depth only — not live coding. Set sourceName to the forum (e.g. "Blind") when known; never read URLs aloud.
 ${plan.scenarios ? "- scenario: reasoning under realistic constraints, drawn from the org context.\n" : ""}- jd_gap: cover a stated requirement the resume gives no evidence for — asked as a direct question about their experience with it, NOT as a hypothetical scenario.
 - Every question needs escalations (asked when the answer is strong) and ideally a fallback (a simpler angle if they are struggling).
 - strongAnswer/weakAnswer must be specific enough to grade against later. "Good understanding" is useless; "identifies that the pool must close idle connections before the server does" is gradable.
@@ -370,7 +390,7 @@ Return ONLY a JSON object:
   "role": "...",
   "seniority": "intern|junior|mid|senior|staff|lead",
   "rubric": [{"name","rationale","strongSignal","weakSignal","generated"}],
-  "questions": [{"id","kind","question","intent","axes","escalations","fallback","strongAnswer","weakAnswer","scenarioId","minutes"}],
+  "questions": [{"id","kind","question","intent","axes","escalations","fallback","strongAnswer","weakAnswer","scenarioId","sourceName","sourceUrl","minutes"}],
   "claimsToVerify": [{"claim","jdRequirement"}],
   "unevidencedRequirements": ["..."],
   "jdCoverage": [{"requirement": "a material requirement from the JD, in plain words", "status": "evidenced|partial|missing", "evidence": "the resume claim that supports it (quote or paraphrase), or a short note on why it is a gap"}],
@@ -400,7 +420,9 @@ function toList(value: unknown): string[] {
 function normaliseQuestion(q: any, index: number): BankQuestion {
   return {
     id: q?.id || `q${index + 1}`,
-    kind: ["resume_probe", "technical", "scenario", "jd_gap"].includes(q?.kind) ? q.kind : "resume_probe",
+    kind: ["resume_probe", "technical", "market", "scenario", "jd_gap"].includes(q?.kind)
+      ? q.kind
+      : "resume_probe",
     question: String(q?.question || "").trim(),
     intent: String(q?.intent || "").trim(),
     axes: toList(q?.axes),
@@ -409,6 +431,8 @@ function normaliseQuestion(q: any, index: number): BankQuestion {
     strongAnswer: toList(q?.strongAnswer),
     weakAnswer: toList(q?.weakAnswer),
     scenarioId: q?.scenarioId ? String(q.scenarioId) : undefined,
+    sourceName: q?.sourceName ? String(q.sourceName) : undefined,
+    sourceUrl: q?.sourceUrl ? String(q.sourceUrl) : undefined,
     minutes: Number(q?.minutes) || 5,
   };
 }
@@ -460,6 +484,45 @@ function fitBudget(questions: BankQuestion[], duration: InterviewDuration): Bank
   }));
 }
 
+function suggestedToBankQuestion(q: SuggestedMarketQuestion, index: number): BankQuestion {
+  return {
+    id: `market${index + 1}`,
+    kind: "market",
+    question: q.question,
+    intent: q.intent,
+    axes: ["Technical Knowledge", "Problem-Solving Mindset"],
+    escalations: [],
+    fallback: q.fallback,
+    strongAnswer: q.strongAnswer,
+    weakAnswer: q.weakAnswer,
+    sourceName: q.source,
+    sourceUrl: q.sourceUrl,
+    minutes: 4,
+  };
+}
+
+/** Ensures the bank includes market questions from web research. */
+function mergeMarketQuestions(
+  questions: BankQuestion[],
+  research: WebResearchResult,
+  targetCount: number
+): BankQuestion[] {
+  if (targetCount <= 0 || !research.suggested.length) return questions;
+
+  const have = questions.filter((q) => q.kind === "market").length;
+  if (have >= targetCount) return questions;
+
+  const toAdd = research.suggested
+    .slice(0, targetCount - have)
+    .map((s, i) => suggestedToBankQuestion(s, have + i));
+
+  if (!toAdd.length) return questions;
+
+  // Insert market questions after the first resume probe when possible.
+  const insertAt = Math.min(2, questions.length);
+  return [...questions.slice(0, insertAt), ...toAdd, ...questions.slice(insertAt)];
+}
+
 export async function generateQuestionBank(opts: {
   jdText: string;
   resumeText: string;
@@ -470,6 +533,12 @@ export async function generateQuestionBank(opts: {
   const pack = loadContextPack();
   const discipline = inferDiscipline(opts.jdText);
 
+  const webResearch = await researchMarketInterviewQuestions({
+    jdText: opts.jdText,
+    discipline,
+    count: plan.market,
+  });
+
   const relevantCount = pack
     ? pack.scenarios.filter((sc) => {
         const tags = (sc as any).disciplines as string[] | undefined;
@@ -477,18 +546,22 @@ export async function generateQuestionBank(opts: {
       }).length
     : 0;
   console.log(
-    `[questionBank] discipline "${discipline}" — ${relevantCount} of ${pack?.scenarios.length ?? 0} scenarios relevant`
+    `[questionBank] discipline "${discipline}" — ${relevantCount} of ${pack?.scenarios.length ?? 0} scenarios relevant; ` +
+      `web research ${webResearch.hits.length} hit(s), ${webResearch.suggested.length} market Q(s)`
   );
+
+  const webSection = formatWebResearchForPrompt(webResearch);
 
   const { parsed } = await callJson({
     modelId: GENERATION_MODEL_ID,
-    system: buildSystemPrompt(pack, plan, duration, discipline),
+    system: buildSystemPrompt(pack, plan, duration, discipline, webSection),
     user: `=== JOB DESCRIPTION ===\n${opts.jdText.slice(0, 20000)}\n\n=== CANDIDATE RESUME ===\n${opts.resumeText.slice(0, 20000)}`,
     maxTokens: 8000,
     temperature: 0.4,
     label: "question-bank",
   });
-  const questions: BankQuestion[] = (parsed.questions || []).map(normaliseQuestion);
+  let questions: BankQuestion[] = (parsed.questions || []).map(normaliseQuestion);
+  questions = mergeMarketQuestions(questions, webResearch, plan.market);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -502,6 +575,20 @@ export async function generateQuestionBank(opts: {
     jdCoverage: normaliseCoverage(parsed.jdCoverage),
     openingLine: parsed.openingLine || "",
     discipline,
+    webResearch:
+      plan.market > 0
+        ? {
+            roleHint: webResearch.roleHint,
+            queries: webResearch.queries,
+            hitCount: webResearch.hits.length,
+            fromWeb: webResearch.fromWeb,
+            sources: webResearch.hits.map((h) => ({
+              site: h.site,
+              title: h.title,
+              url: h.url,
+            })),
+          }
+        : undefined,
   };
 }
 
@@ -598,6 +685,7 @@ export function renderInterviewerPrompt(
   const kindTag: Record<string, string> = {
     resume_probe: "Resume — verify a claim",
     technical: "Technical — from the JD (not their CV)",
+    market: "Market — commonly asked on LeetCode / Blind / Glassdoor",
     jd_gap: "JD gap — skill not evidenced on resume",
     scenario: "Scenario",
   };
@@ -638,7 +726,7 @@ ${questionBlock}
 
 HOW TO CONDUCT THIS
 
-MIX RESUME AND TECHNICAL — CRITICAL. Your list includes resume verification questions AND standalone technical questions (tagged "Technical — from the JD"). Do NOT turn the whole interview into "tell me about every project on your CV". When you reach a technical question, ask it even if you have not exhausted their resume — it tests how they think about the role's core skills, not what they list on paper. If the list is short on technical tags, still ask at least one JD-grounded technical question (tradeoff, debugging approach, or how they'd solve a realistic problem in this role) before you wrap.
+MIX RESUME, TECHNICAL, AND MARKET — CRITICAL. Your list includes resume verification, JD technical questions, AND market questions (tagged "Market — commonly asked on LeetCode / Blind / Glassdoor"). Do NOT turn the whole interview into "tell me about every project on your CV". Ask every market question — these reflect what real companies ask for this role on public forums. Never read source URLs aloud; never say "I found this on Blind".
 
 KEEP YOUR TURNS SHORT. This is the single most important instruction. Two or three sentences, then stop talking. You are on a voice call — a thirty-second monologue is unbearable to sit through and burns interview time the candidate needs for answering. Ask the question and stop. Do not preamble, do not restate the question a second way, do not explain why you are asking.
 

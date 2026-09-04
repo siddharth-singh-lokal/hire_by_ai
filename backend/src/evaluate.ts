@@ -107,6 +107,7 @@ Rules:
 - DO mark **incorrect** when they state something factually wrong, contradict a resume claim under probing, or recite terms without understanding when follow-up exposes it.
 - **resume_probe incorrect/partial** is high-weight — it signals resume mismatch; reflect this in axis scores, redFlags, and verdict.
 - **technical incorrect** means their proposed approach or reasoning would not work, not that they forgot a library name.
+- **market** questions come from LeetCode/Blind/Glassdoor research — judge like technical (reasoning at screening depth).
 - Include the best **verbatim candidateQuote** per question (empty string if not_established).
 - List **whatTheyGotRight** and **gapsOrErrors** as short bullet strings — be specific, cite what they said vs what was wrong or missing.
 

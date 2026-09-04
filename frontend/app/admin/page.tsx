@@ -43,15 +43,16 @@ type Duration = 1 | 5 | 15 | 30 | 45;
 
 const DURATION_COPY: Record<Duration, string> = {
   1: "Smoke test — one quick question. For checking the flow end to end.",
-  5: "Demo length. One resume probe + one technical question.",
-  15: "2 resume probes + 1 technical + 1 gap. High-volume screening.",
-  30: "2 resume probes + 2 technical + 1 gap. Recommended.",
-  45: "3 resume probes + 2 technical + 2 gaps. Senior and lead roles.",
+  5: "Demo length. One resume probe + one web-sourced market question.",
+  15: "2 resume + 1 technical + 1 market (LeetCode/Blind) + 1 gap.",
+  30: "2 resume + 1 technical + 2 market + 1 gap. Recommended.",
+  45: "3 resume + 1 technical + 2 market + 2 gaps. Senior and lead roles.",
 };
 
 const KIND_STYLE: Record<string, { label: string; className: string }> = {
   resume_probe: { label: "Resume probe", className: "bg-sky-500/10 text-sky-300 border-sky-500/30" },
   technical: { label: "Technical", className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30" },
+  market: { label: "Market (web)", className: "bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/30" },
   scenario: { label: "Org scenario", className: "bg-violet-500/10 text-violet-300 border-violet-500/30" },
   jd_gap: { label: "JD gap", className: "bg-amber-500/10 text-amber-300 border-amber-500/30" },
 };
@@ -839,10 +840,46 @@ export default function AdminPage() {
                             <p className="mt-1.5 text-[10px] text-slate-500 leading-relaxed">
                               <span className="text-slate-600">Looking for:</span> {q.intent}
                             </p>
+                            {q.kind === "market" && q.sourceName && (
+                              <p className="mt-1 text-[10px] text-fuchsia-400/80">
+                                Source: {q.sourceName}
+                                {q.sourceUrl && (
+                                  <>
+                                    {" · "}
+                                    <a
+                                      href={q.sourceUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="underline hover:text-fuchsia-300"
+                                    >
+                                      link
+                                    </a>
+                                  </>
+                                )}
+                              </p>
+                            )}
                           </div>
                         );
                       })}
                     </div>
+
+                    {bank.webResearch && bank.webResearch.hitCount > 0 && (
+                      <div className="px-5 py-4 border-t border-slate-800/60">
+                        <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">
+                          Web research — {bank.webResearch.roleHint}
+                        </p>
+                        <p className="text-[10px] text-slate-500 mb-2">
+                          {bank.webResearch.hitCount} result(s) from LeetCode / Blind / Glassdoor search
+                        </p>
+                        <ul className="space-y-1">
+                          {bank.webResearch.sources.slice(0, 4).map((s, i) => (
+                            <li key={i} className="text-[10px] text-slate-400 truncate">
+                              <span className="text-fuchsia-400/90">{s.site}</span> — {s.title}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
 
                     {bank.unevidencedRequirements.length > 0 && (
                       <div className="px-5 py-4 border-t border-slate-800/60">

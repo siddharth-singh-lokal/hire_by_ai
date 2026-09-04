@@ -29,7 +29,7 @@ export interface RubricAxis {
 
 export interface BankQuestion {
   id: string;
-  kind: "resume_probe" | "technical" | "scenario" | "jd_gap";
+  kind: "resume_probe" | "technical" | "market" | "scenario" | "jd_gap";
   question: string;
   intent: string;
   axes: string[];
@@ -38,6 +38,8 @@ export interface BankQuestion {
   strongAnswer: string[];
   weakAnswer: string[];
   scenarioId?: string;
+  sourceName?: string;
+  sourceUrl?: string;
   minutes: number;
 }
 
@@ -52,6 +54,13 @@ export interface QuestionBank {
   unevidencedRequirements: string[];
   jdCoverage: { requirement: string; status: "evidenced" | "partial" | "missing"; evidence: string }[];
   openingLine: string;
+  webResearch?: {
+    roleHint: string;
+    queries: string[];
+    hitCount: number;
+    fromWeb: boolean;
+    sources: { site: string; title: string; url: string }[];
+  };
 }
 
 export interface CandidateSession {

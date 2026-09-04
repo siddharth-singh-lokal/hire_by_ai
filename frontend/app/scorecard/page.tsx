@@ -65,6 +65,7 @@ const ACCURACY_STYLE: Record<
 const KIND_LABEL: Record<string, string> = {
   resume_probe: "Resume",
   technical: "Technical",
+  market: "Market (web)",
   jd_gap: "JD gap",
   scenario: "Scenario",
 };
